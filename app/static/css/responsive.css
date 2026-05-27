@@ -1,0 +1,186 @@
+/* SPDX-FileCopyrightText: 2026 BizzAppDev Systems Pvt. Ltd. */
+/* SPDX-License-Identifier: AGPL-3.0-or-later */
+
+@media (max-width: 600px) {
+    .container {
+        padding: 10px;
+    }
+
+    header {
+        margin-bottom: 10px;
+    }
+
+    .logo-container {
+        margin-bottom: 0px;
+    }
+
+    .app-logo {
+        width: 100px;
+        height: 100px;
+    }
+
+    header h1 {
+        font-size: 1.8rem;
+        margin-bottom: 6px;
+    }
+
+    main {
+        position: relative;
+    }
+
+    .controls {
+        flex-direction: column;
+        gap: 15px;
+    }
+
+    .controls .language-select,
+    .controls .microphone-select {
+        width: 100%;
+        max-width: 100%;
+    }
+
+    .controls .language-select-wrapper {
+        width: 100%;
+    }
+
+    .controls .btn-swap {
+        width: 50px;
+        height: 46px;
+        transform: none;
+        margin-top: 0;
+    }
+
+    .controls .btn-swap .btn-icon {
+        font-size: 1.5rem;
+        transform: rotate(90deg);
+    }
+
+    .controls .btn-swap:hover {
+        transform: scale(1.1) rotate(180deg);
+        box-shadow: 0 5px 20px rgba(255, 122, 24, 0.4);
+    }
+
+    .status {
+        display: block !important;
+        margin-bottom: 15px;
+        padding: 10px;
+        font-size: 0.9rem;
+    }
+
+    .readiness-panel {
+        padding: 8px 12px;
+        margin-bottom: 14px;
+        width: 100%;
+        max-width: 100%;
+    }
+
+    .readiness-summary {
+        text-align: left;
+        white-space: normal;
+    }
+
+    .recording-controls {
+        flex-wrap: wrap;
+        gap: 8px;
+        margin-bottom: 12px;
+    }
+
+    .session-controls {
+        flex-wrap: wrap;
+    }
+
+    .btn {
+        flex: 1 1 100%;
+        min-width: 100%;
+        justify-content: center;
+        padding: 12px 20px;
+        font-size: 0.95rem;
+    }
+
+    .btn-live,
+    .btn-share {
+        width: 70px;
+        min-width: 70px;
+        height: 56px;
+        flex: 0 0 70px;
+        padding: 0;
+    }
+
+    .btn-icon {
+        font-size: 1.2rem;
+    }
+
+    .recording-indicator {
+        padding: 10px 0 14px;
+        gap: 0;
+    }
+
+    .listening-wave-side {
+        width: 70px;
+        height: 42px;
+    }
+
+    .listening-wave-side span {
+        width: 72px;
+        height: 36px;
+    }
+
+    .listening-mic {
+        width: 58px;
+        height: 58px;
+        flex-basis: 58px;
+        min-width: 58px;
+        max-width: 58px;
+    }
+
+    .btn-share {
+        opacity: 0.7;
+        cursor: not-allowed;
+    }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .btn,
+    .settings-toggle,
+    .recording-indicator,
+    .recording-dot,
+    .listening-wave-side span,
+    .listening-mic,
+    .mic-base::before,
+    .readiness-pulse-dot {
+        animation: none !important;
+        transition: none !important;
+    }
+
+    .btn-live::after,
+    .btn-share::after,
+    .btn-swap::after,
+    .recording-indicator::before {
+        display: none;
+    }
+}
+
+/* Language swap separator */
+.language-swap-separator {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    margin: 20px 0;
+    padding: 10px 0;
+    border-top: 1px solid rgba(255, 255, 255, 0.2);
+    border-bottom: 1px solid rgba(255, 255, 255, 0.2);
+}
+
+.language-swap-separator .swap-line {
+    flex: 1;
+    height: 1px;
+    background: linear-gradient(to right, transparent, rgba(102, 126, 234, 0.6), transparent);
+}
+
+.language-swap-separator .swap-text {
+    margin: 0 15px;
+    font-size: 0.85rem;
+    color: rgba(255, 255, 255, 0.8);
+    font-style: italic;
+    white-space: nowrap;
+}

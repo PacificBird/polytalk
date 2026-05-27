@@ -1,0 +1,425 @@
+# SPDX-FileCopyrightText: 2026 BizzAppDev Systems Pvt. Ltd.
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
+"""
+Text-to-Speech service supporting multiple providers (OpenAI, Piper).
+
+Supports both real API and mock mode for testing.
+
+Voice Selection Fallback Chain:
+1. Use configured default voice from config.yaml for the language
+2. Match exact language code from Piper TTS API voices (e.g., 'en_GB-jenny_dioco-medium')
+3. Match base language code from API voices (e.g., 'en' from 'en_GB' or 'en_US')
+4. Fall back to default voice from config
+"""
+
+import asyncio
+import time
+import uuid
+from pathlib import Path
+from typing import Optional
+
+import httpx
+
+from .base import BaseTTSService, TTSResult
+from ..config import get_config
+from ..utils.logger import get_logger
+
+logger = get_logger(__name__)
+
+
+class TTSService(BaseTTSService):
+    """
+    Multi-provider TTS service.
+
+    Converts text to speech using OpenAI TTS API, Piper TTS, or mock mode.
+    Falls back to mock mode when configured or when services are unavailable.
+    """
+
+    def __init__(self) -> None:
+        """Initialize TTS service with configuration."""
+        self.config = get_config().tts
+        self.app_config = get_config().app
+        self.enabled = self.config.get("enabled", True)
+        self.mock_mode = self.config.get("mock_mode", True)
+        self.provider = self.config.get("provider", "piper")
+        self.base_url = self.config.get("base_url", "http://localhost:5000")
+        self.voice = self.config.get("voice", "en_US-lessac-medium")
+        self.timeout = self.config.get("timeout_seconds", 15)
+        self.media_dir = get_config().media_output_dir
+        self._voices_cache: Optional[dict] = None
+        self._voices_cache_timestamp: Optional[float] = None
+        self._voices_cache_ttl = 3600
+        self._voices_lock = asyncio.Lock()
+        self.default_voices = self.config.get("default_voices", {})
+        self.length_scales = self.config.get("length_scales", {})
+
+        # Singleton httpx.AsyncClient with connection pooling
+        self._http_client = httpx.AsyncClient(
+            timeout=self.timeout,
+            limits=httpx.Limits(
+                max_connections=200,
+                max_keepalive_connections=50,
+                keepalive_expiry=60.0,
+            ),
+        )
+
+        logger.info(
+            f"TTSService initialized: provider={self.provider}, enabled={self.enabled}, mock_mode={self.mock_mode}"
+        )
+
+    async def synthesize(
+        self, text: str, language: str, output_path: Optional[Path] = None
+    ) -> TTSResult:
+        """
+        Synthesize speech from text.
+
+        Args:
+            text: Text to convert to speech
+            language: Language code for speech
+            output_path: Optional path to save audio file
+
+        Returns:
+            TTSResult with audio file path
+        """
+        if not self.enabled:
+            logger.warning("TTS service is disabled")
+            return TTSResult(success=False, error="TTS service is disabled")
+
+        if self.mock_mode:
+            logger.info("Using mock TTS")
+            return await self._mock_synthesize(text, language, output_path)
+
+        try:
+            if self.provider == "piper":
+                return await self._piper_synthesize(text, language, output_path)
+            else:
+                return await self._openai_synthesize(text, language, output_path)
+        except Exception as e:
+            logger.error(f"TTS synthesis failed: {e}")
+            return TTSResult(success=False, error=str(e))
+
+    async def _mock_synthesize(
+        self, text: str, language: str, output_path: Optional[Path] = None
+    ) -> TTSResult:
+        """
+        Generate mock TTS audio for testing.
+
+        Creates a simple silence audio file to simulate TTS output.
+
+        Args:
+            text: Text to convert to speech
+            language: Language code for speech
+            output_path: Optional path to save audio file
+
+        Returns:
+            Mock TTSResult with generated audio path
+        """
+        try:
+            import wave
+
+            if output_path is None:
+                unique_id = str(uuid.uuid4())[:8]
+                output_path = self.media_dir / f"tts_{unique_id}.wav"
+
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+
+            sample_rate = 22050
+            duration = min(max(len(text) / 10, 1.0), 10.0)
+            num_samples = int(sample_rate * duration)
+
+            with wave.open(str(output_path), "w") as wav_file:
+                wav_file.setnchannels(1)
+                wav_file.setsampwidth(2)
+                wav_file.setframerate(sample_rate)
+                wav_file.writeframes(b"\x00\x00" * num_samples)
+
+            audio_url = f"/media/output/{output_path.name}"
+
+            logger.info(f"Mock TTS generated: {output_path}")
+
+            return TTSResult(
+                audio_path=output_path,
+                audio_url=audio_url,
+                duration=duration,
+                success=True,
+            )
+        except Exception as e:
+            logger.error(f"Mock TTS failed: {e}")
+            return TTSResult(success=False, error=f"Mock TTS failed: {e}")
+
+    async def _fetch_voices(self) -> dict:
+        """
+        Fetch available voices from Piper TTS API with thread-safe caching.
+
+        Uses asyncio.Lock to prevent concurrent requests and implements
+        TTL-based cache expiration (1 hour).
+
+        Returns:
+            Dictionary of available voices with metadata
+        """
+        if not self.enabled:
+            logger.debug("TTS service disabled; skipping voice fetch")
+            return {}
+
+        current_time = time.time()
+
+        if (
+            self._voices_cache is not None
+            and self._voices_cache_timestamp is not None
+            and (current_time - self._voices_cache_timestamp) < self._voices_cache_ttl
+        ):
+            return self._voices_cache
+
+        async with self._voices_lock:
+            if (
+                self._voices_cache is not None
+                and self._voices_cache_timestamp is not None
+                and (current_time - self._voices_cache_timestamp)
+                < self._voices_cache_ttl
+            ):
+                return self._voices_cache
+
+            try:
+                response = await self._http_client.get(
+                    f"{self.base_url.rstrip('/')}/voices"
+                )
+                response.raise_for_status()
+                self._voices_cache = response.json()
+                self._voices_cache_timestamp = current_time
+                logger.info(f"Fetched {len(self._voices_cache)} voices from Piper TTS")
+                return self._voices_cache
+            except Exception as e:
+                logger.warning(f"Failed to fetch voices from Piper TTS: {e}")
+                return {}
+
+    async def _get_voice_for_language(self, language: str) -> str:
+        """
+        Get the appropriate voice for a given language code from Piper TTS.
+
+        Args:
+            language: Language code (e.g., 'en', 'en_US', 'hi_IN', 'en-US')
+
+        Returns:
+            Voice name for the language, falling back to default voice
+
+        Fallback chain:
+        1. Available configured default voice for exact language
+        2. Available configured default voice for base language
+        3. Exact language match from API voices
+        4. Base language match from API voices
+        5. Default voice from config
+        """
+        normalized_language = language.replace("-", "_")
+        lang_base = normalized_language.split("_")[0].lower()
+        voices = await self._fetch_voices()
+
+        def voice_available(voice_name: str) -> bool:
+            return any(
+                voice_key.replace(".onnx", "") == voice_name
+                for voice_key in voices.keys()
+            )
+
+        if normalized_language in self.default_voices:
+            default_voice = self.default_voices[normalized_language]
+            if not voices or voice_available(default_voice):
+                logger.info(f"Using default voice for '{language}': {default_voice}")
+                return default_voice
+            logger.warning(
+                f"Configured default voice for '{language}' is unavailable: "
+                f"{default_voice}. Falling back to base language or discovered voices."
+            )
+
+        if lang_base in self.default_voices:
+            default_voice = self.default_voices[lang_base]
+            if not voices or voice_available(default_voice):
+                logger.info(f"Using default voice for '{language}': {default_voice}")
+                return default_voice
+            logger.warning(
+                f"Configured default voice for '{lang_base}' is unavailable: "
+                f"{default_voice}. Falling back to discovered voices."
+            )
+
+        if not voices:
+            logger.warning(
+                f"No voices available from TTS API. "
+                f"Ensure default voice '{self.voice}' is configured correctly."
+            )
+            return self.voice
+
+        for voice_key in voices.keys():
+            clean_key = voice_key.replace(".onnx", "")
+            if clean_key.startswith(normalized_language):
+                logger.info(f"Matched voice for '{language}': {clean_key}")
+                return clean_key
+
+        for voice_key in voices.keys():
+            clean_key = voice_key.replace(".onnx", "")
+            if clean_key.startswith(f"{lang_base}_"):
+                logger.info(
+                    f"Matched voice for '{language}' (base: '{lang_base}'): {clean_key}"
+                )
+                return clean_key
+
+        logger.warning(
+            f"No voice found for language '{language}'. "
+            f"Using default: {self.voice}. "
+            f"Available languages: {set(v.split('_')[0] for v in voices.keys())}"
+        )
+        return self.voice
+
+    def _get_length_scale_for_language(self, language: str, voice: str) -> float:
+        """
+        Get Piper speaking speed for a language/voice.
+
+        Piper length scale is inverse speed: lower values speak faster. The
+        lookup supports voice-specific, exact language, base language, then
+        global default settings.
+        """
+        normalized_language = language.replace("-", "_")
+        lang_base = normalized_language.split("_")[0].lower()
+
+        candidates = [
+            voice,
+            normalized_language,
+            lang_base,
+            "default",
+        ]
+
+        for key in candidates:
+            if key in self.length_scales:
+                return float(self.length_scales[key])
+
+        return float(self.config.get("length_scale", 0.9))
+
+    async def _piper_synthesize(
+        self, text: str, language: str, output_path: Optional[Path] = None
+    ) -> TTSResult:
+        """
+        Synthesize speech using Piper TTS API.
+
+        Args:
+            text: Text to convert to speech
+            language: Language code for speech
+            output_path: Optional path to save audio file
+
+        Returns:
+            TTSResult with audio file path
+        """
+        url = self.base_url.rstrip("/")
+
+        # Select voice dynamically from Piper TTS API
+        voice = await self._get_voice_for_language(language)
+
+        payload = {
+            "text": text,
+            "voice": voice,
+            "length_scale": self._get_length_scale_for_language(language, voice),
+        }
+
+        try:
+            response = await self._http_client.post(url, json=payload)
+            response.raise_for_status()
+
+            audio_content = response.content
+
+            if output_path is None:
+                unique_id = str(uuid.uuid4())[:8]
+                output_path = self.media_dir / f"tts_{unique_id}.wav"
+
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+
+            with open(output_path, "wb") as f:
+                f.write(audio_content)
+
+            audio_url = f"/media/output/{output_path.name}"
+
+            logger.info(f"Piper TTS generated: {output_path} (voice: {voice})")
+
+            return TTSResult(
+                audio_path=output_path,
+                audio_url=audio_url,
+                success=True,
+            )
+        except httpx.TimeoutException:
+            logger.error(f"Piper TTS timeout after {self.timeout}s")
+            return TTSResult(
+                success=False,
+                error=f"Piper TTS timeout after {self.timeout}s",
+            )
+        except httpx.HTTPError as e:
+            logger.error(f"Piper TTS HTTP error: {e}")
+            return TTSResult(
+                success=False,
+                error=f"Piper TTS HTTP error: {e}",
+            )
+
+    async def _openai_synthesize(
+        self, text: str, language: str, output_path: Optional[Path] = None
+    ) -> TTSResult:
+        """
+        Synthesize speech using OpenAI TTS API.
+
+        Args:
+            text: Text to convert to speech
+            language: Language code for speech
+            output_path: Optional path to save audio file
+
+        Returns:
+            TTSResult with audio file path
+        """
+        url = self.base_url.rstrip("/") + "/v1/audio/speech"
+
+        headers = {
+            "Authorization": f"Bearer {self.config.get('api_key', '')}",
+        }
+
+        payload = {
+            "model": "tts-1",
+            "input": text,
+            "voice": self.config.get("voice", "alloy"),
+            "response_format": "mp3",
+        }
+
+        try:
+            response = await self._http_client.post(url, headers=headers, json=payload)
+            response.raise_for_status()
+
+            audio_content = response.content
+        except httpx.TimeoutException:
+            logger.error(f"OpenAI TTS timeout after {self.timeout}s")
+            return TTSResult(
+                success=False,
+                error=f"OpenAI TTS timeout after {self.timeout}s",
+            )
+        except httpx.HTTPError as e:
+            logger.error(f"OpenAI TTS HTTP error: {e}")
+            return TTSResult(
+                success=False,
+                error=f"OpenAI TTS HTTP error: {e}",
+            )
+
+        if output_path is None:
+            unique_id = str(uuid.uuid4())[:8]
+            output_path = self.media_dir / f"tts_{unique_id}.mp3"
+
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+
+        with open(output_path, "wb") as f:
+            f.write(audio_content)
+
+        audio_url = f"/media/output/{output_path.name}"
+
+        logger.info(f"OpenAI TTS generated: {output_path}")
+
+        return TTSResult(
+            audio_path=output_path,
+            audio_url=audio_url,
+            success=True,
+        )
+
+    async def close(self) -> None:
+        """Close the HTTP client connection pool."""
+        if self._http_client:
+            await self._http_client.aclose()
+            logger.info("TTSService HTTP client closed")

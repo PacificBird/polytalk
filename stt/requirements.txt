@@ -1,0 +1,9 @@
+# SPDX-FileCopyrightText: 2026 BizzAppDev Systems Pvt. Ltd.
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
+fastapi==0.115.6
+uvicorn[standard]==0.32.1
+python-multipart==0.0.12
+
+faster-whisper==1.0.3
+requests

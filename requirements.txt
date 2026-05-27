@@ -1,0 +1,23 @@
+# PolyTalk Dependencies
+# Python 3.10+ required
+
+# Web framework
+fastapi>=0.109.0
+uvicorn[standard]>=0.27.0
+python-multipart>=0.0.6
+
+# Templates
+jinja2>=3.1.2
+
+# HTTP client
+httpx>=0.26.0
+
+# WebSocket support
+websockets>=12.0
+
+# Configuration
+pyyaml>=6.0.1
+python-dotenv>=1.0.0
+
+# Type checking (optional but recommended)
+pydantic>=2.5.0

@@ -1,0 +1,60 @@
+# Python
+__pycache__
+*.py[cod]
+*$py.class
+*.so
+.Python
+.eggs
+*.egg-info
+dist
+build
+
+# Virtual environments
+venv
+env
+.venv
+
+# IDE
+.idea
+.vscode
+*.swp
+*.swo
+
+# Testing
+.pytest_cache
+.ruff_cache
+.coverage
+coverage.xml
+lcov.info
+htmlcov
+.tox
+
+
+# Local configuration and generated data
+.env
+.env.*
+!.env.example
+config/config.yaml
+media
+tts/voices/*
+!tts/voices/.gitkeep
+
+# Git
+.git
+.gitignore
+
+# Docker
+Dockerfile
+docker-compose*.yml
+.dockerignore
+
+# Documentation
+*.md
+docs
+
+# Development files
+.env.local
+*.local
+
+# Tests (not needed in container)
+tests/
