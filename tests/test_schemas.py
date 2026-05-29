@@ -6,6 +6,7 @@ Tests for Pydantic schemas.
 """
 
 from app.schemas.translation import HealthResponse, ErrorResponse
+from app.version import __version__
 
 
 class TestHealthResponse:
@@ -15,7 +16,7 @@ class TestHealthResponse:
         """Test HealthResponse with minimal data."""
         response = HealthResponse(status="healthy")
         assert response.status == "healthy"
-        assert response.version == "1.0.0"
+        assert response.version == __version__
 
     def test_health_response_full(self):
         """Test HealthResponse with all fields."""
@@ -33,24 +34,24 @@ class TestHealthResponse:
 
     def test_health_response_model_dump(self):
         """Test HealthResponse model_dump method."""
-        response = HealthResponse(status="healthy", version="1.0.0")
+        response = HealthResponse(status="healthy", version=__version__)
         data = response.model_dump()
         assert data["status"] == "healthy"
-        assert data["version"] == "1.0.0"
+        assert data["version"] == __version__
 
     def test_health_response_model_dump_json(self):
         """Test HealthResponse model_dump_json method."""
-        response = HealthResponse(status="healthy", version="1.0.0")
+        response = HealthResponse(status="healthy", version=__version__)
         json_str = response.model_dump_json()
         assert "healthy" in json_str
-        assert "1.0.0" in json_str
+        assert __version__ in json_str
 
     def test_health_response_from_dict(self):
         """Test HealthResponse from dictionary."""
-        data = {"status": "healthy", "version": "1.0.0"}
+        data = {"status": "healthy", "version": __version__}
         response = HealthResponse(**data)
         assert response.status == "healthy"
-        assert response.version == "1.0.0"
+        assert response.version == __version__
 
 
 class TestErrorResponse:

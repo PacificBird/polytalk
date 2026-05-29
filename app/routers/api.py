@@ -20,6 +20,7 @@ from fastapi import (
 
 from ..services.pipeline_service import TranslationPipelineService
 from ..utils.logger import get_logger
+from ..version import __version__
 
 logger = get_logger(__name__)
 
@@ -51,7 +52,7 @@ async def health_check() -> dict:
     """
     return {
         "status": "healthy",
-        "version": "1.0.0",
+        "version": __version__,
         "service": "PolyTalk API",
     }
 

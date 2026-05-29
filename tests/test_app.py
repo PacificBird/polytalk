@@ -909,11 +909,12 @@ class TestMainApp:
     def test_create_app(self):
         """Test creating FastAPI application."""
         from app.main import create_app
+        from app.version import __version__
 
         app = create_app()
         assert app is not None
         assert app.title == "PolyTalk"
-        assert app.version == "1.0.0"
+        assert app.version == __version__
 
     def test_app_has_routers(self):
         """Test that app includes routers."""

@@ -18,6 +18,7 @@ from fastapi.staticfiles import StaticFiles
 from .config import get_config
 from .routers import api_router, web_router
 from .utils.logger import get_logger
+from .version import __version__
 
 logger = get_logger(__name__)
 
@@ -32,7 +33,7 @@ def create_app() -> FastAPI:
     app = FastAPI(
         title="PolyTalk",
         description="Speech-to-speech translation web application",
-        version="1.0.0",
+        version=__version__,
         docs_url="/docs",
         redoc_url="/redoc",
         lifespan=lifespan,

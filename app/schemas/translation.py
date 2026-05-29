@@ -8,6 +8,8 @@ Pydantic schemas for request/response validation.
 from pydantic import BaseModel
 from typing import Optional
 
+from ..version import __version__
+
 
 class HealthResponse(BaseModel):
     """
@@ -19,7 +21,7 @@ class HealthResponse(BaseModel):
     """
 
     status: str
-    version: str = "1.0.0"
+    version: str = __version__
 
 
 class ErrorResponse(BaseModel):
