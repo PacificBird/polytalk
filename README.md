@@ -44,11 +44,28 @@ Created and maintained by BizzAppDev Systems Pvt. Ltd.
 
 ## How It Works
 
-1. **Recording**: Browser-based microphone recording
-2. **Transcription**: Audio to text using Whisper-compatible services
-3. **Translation**: Text translation using OpenAI-compatible APIs
-4. **Synthesis**: Text-to-speech conversion
-5. **Playback**: Browser-based audio playback
+1. **Capture**: PolyTalk receives live audio from a microphone, tab, or other browser-supported source.
+2. **Listen**: The audio stream is prepared for real-time processing.
+3. **Understand**: Speech becomes readable text.
+4. **Translate**: The text is converted into the target language.
+5. **Respond**: Users receive translated text and translated speech.
+
+```text
+Browser audio source -> PolyTalk live pipeline
+                           |
+                           +-- 1. Listen: live audio stream
+                           |
+                           +-- 2. Understand: speech -> text
+                           |       faster-whisper / Whisper-compatible
+                           |
+                           +-- 3. Translate: text -> target language
+                           |       OpenAI-compatible / Ollama / vLLM / Anthropic / Gemini
+                           |
+                           +-- 4. Respond
+                                   +-- translated text   -> Browser UI
+                                   +-- translated speech -> Browser playback
+                                       Piper / compatible TTS
+```
 
 ## Features
 
@@ -58,6 +75,49 @@ Created and maintained by BizzAppDev Systems Pvt. Ltd.
 - Docker and Docker Compose support
 - Simple vanilla JavaScript frontend
 - Easy to extend for additional providers and workflows
+
+## Use Cases
+
+- Live multilingual meetings, calls, and demos
+- Customer support conversations across languages
+- Field-team, clinic, and service-desk communication where privacy matters
+- Classroom, training, and onboarding translation
+- Private or offline speech workflows on controlled infrastructure
+- Self-hosted AI prototypes that need a complete speech-to-speech pipeline
+
+## Why Self-Host PolyTalk?
+
+- Keep audio, transcripts, translations, and generated speech on infrastructure you control.
+- Avoid hard dependency on a single hosted speech or translation vendor.
+- Tune latency, batching, VAD, model size, workers, and translation context for real deployments.
+- Run with CPU, GPU, local open-weight models, private APIs, or hosted providers.
+- Use mock mode for safe local demos and CI-style checks without API keys.
+
+## Provider Compatibility
+
+PolyTalk is configuration-first and provider-flexible. The default Docker Compose
+stack includes local STT and TTS services, while translation can point to hosted
+or self-hosted model APIs.
+
+| Pipeline stage | Built-in/default path | Compatible options |
+|----------------|-----------------------|--------------------|
+| STT | faster-whisper service over WebSocket | Whisper-compatible WebSocket services that accept 16 kHz mono int16 PCM |
+| Translation | OpenAI-compatible chat completions | Ollama, vLLM, LM Studio, LiteLLM, OpenAI-compatible Responses, Anthropic Messages-style, Gemini Generate Content-style |
+| TTS | Local Piper HTTP service | Piper-compatible HTTP services, configured OpenAI-style TTS fallback |
+
+See [Provider Extension](docs/provider-extension.md) for service contracts,
+wire formats, and guidance for adding custom providers.
+
+## Self-Hosted vs Hosted-Only APIs
+
+PolyTalk is designed for teams that want live speech-to-speech translation
+without giving up deployment control. Hosted-only translation APIs can be useful
+when you want a managed service, but PolyTalk gives you an open-source pipeline
+that can run in your own environment, mix local and remote providers, and keep
+the browser, WebSocket pipeline, STT, translation, and TTS layers configurable.
+
+The Community Edition is AGPL-3.0 licensed for open-source use, with commercial
+licensing available for proprietary deployments.
 
 ## Quick Start
 
@@ -282,6 +342,21 @@ Set `LOG_LEVEL=DEBUG` when diagnosing latency. Streaming debug logs include STT
 queue wait, STT inference time, emit delay, ASR-to-translation queue wait,
 translation request time, and TTS queue/duration. When `LOG_LEVEL` is unset,
 PolyTalk defaults to `INFO`.
+
+### Benchmark Preview
+
+PolyTalk includes small benchmark scripts for measuring each stage of the live
+translation path before you tune a deployment.
+
+| Benchmark | What it measures | Script |
+|-----------|------------------|--------|
+| STT | First transcript timing and transcription service behavior | `tools/benchmarks/benchmark_stt.py` |
+| Translation | Translation provider latency for repeated text chunks | `tools/benchmarks/benchmark_translation.py` |
+| TTS | Speech synthesis latency and generated audio size | `tools/benchmarks/benchmark_tts.py` |
+| Full pipeline | First transcription, first translation, first TTS, event counts, and p50/p95 event arrival times | `tools/benchmarks/benchmark_pipeline.py` |
+
+See [Benchmarking](docs/benchmarking.md) for sample commands, fixture audio,
+and guidance on reading results.
 
 ## API Endpoints
 
