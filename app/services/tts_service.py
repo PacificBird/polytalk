@@ -44,6 +44,8 @@ class TTSService(BaseTTSService):
         self.mock_mode = self.config.get("mock_mode", True)
         self.provider = self.config.get("provider", "piper")
         self.base_url = self.config.get("base_url", "http://localhost:5000")
+        self.providers = self.config.get("providers", {})
+        self.language_providers = self.config.get("language_providers", {})
         self.voice = self.config.get("voice", "en_US-lessac-medium")
         self.timeout = self.config.get("timeout_seconds", 15)
         self.media_dir = get_config().media_output_dir
@@ -91,10 +93,12 @@ class TTSService(BaseTTSService):
             return await self._mock_synthesize(text, language, output_path)
 
         try:
-            if self.provider == "piper":
+            provider = self._get_provider_for_language(language)
+            if provider == "piper":
                 return await self._piper_synthesize(text, language, output_path)
-            else:
-                return await self._openai_synthesize(text, language, output_path)
+            if provider == "supertonic":
+                return await self._supertonic_synthesize(text, language, output_path)
+            return await self._openai_synthesize(text, language, output_path)
         except Exception as e:
             logger.error(f"TTS synthesis failed: {e}")
             return TTSResult(success=False, error=str(e))
@@ -148,6 +152,46 @@ class TTSService(BaseTTSService):
             logger.error(f"Mock TTS failed: {e}")
             return TTSResult(success=False, error=f"Mock TTS failed: {e}")
 
+    def _normalize_language(self, language: str) -> tuple[str, str]:
+        """Return normalized exact and base language codes."""
+        normalized_language = language.replace("-", "_")
+        lang_base = normalized_language.split("_")[0].lower()
+        return normalized_language, lang_base
+
+    def _get_provider_for_language(self, language: str) -> str:
+        """Resolve the TTS provider for a language, falling back to default."""
+        normalized_language, lang_base = self._normalize_language(language)
+        return self.language_providers.get(
+            normalized_language,
+            self.language_providers.get(lang_base, self.provider),
+        )
+
+    def _get_provider_config(self, provider: str) -> dict:
+        """Return provider-specific config merged with top-level defaults."""
+        provider_config = self.providers.get(provider, {})
+        return {**self.config, **provider_config}
+
+    def _get_provider_base_url(self, provider: str) -> str:
+        """Return the base URL for a provider."""
+        provider_config = self._get_provider_config(provider)
+        return provider_config.get("base_url", self.base_url).rstrip("/")
+
+    @staticmethod
+    def _config_int(value: object, default: int) -> int:
+        """Parse an integer config value with a safe fallback."""
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return default
+
+    @staticmethod
+    def _config_float(value: object, default: float) -> float:
+        """Parse a float config value with a safe fallback."""
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return default
+
     async def _fetch_voices(self) -> dict:
         """
         Fetch available voices from Piper TTS API with thread-safe caching.
@@ -182,7 +226,7 @@ class TTSService(BaseTTSService):
 
             try:
                 response = await self._http_client.get(
-                    f"{self.base_url.rstrip('/')}/voices"
+                    f"{self._get_provider_base_url('piper')}/voices"
                 )
                 response.raise_for_status()
                 self._voices_cache = response.json()
@@ -210,8 +254,7 @@ class TTSService(BaseTTSService):
         4. Base language match from API voices
         5. Default voice from config
         """
-        normalized_language = language.replace("-", "_")
-        lang_base = normalized_language.split("_")[0].lower()
+        normalized_language, lang_base = self._normalize_language(language)
         voices = await self._fetch_voices()
 
         def voice_available(voice_name: str) -> bool:
@@ -276,8 +319,7 @@ class TTSService(BaseTTSService):
         lookup supports voice-specific, exact language, base language, then
         global default settings.
         """
-        normalized_language = language.replace("-", "_")
-        lang_base = normalized_language.split("_")[0].lower()
+        normalized_language, lang_base = self._normalize_language(language)
 
         candidates = [
             voice,
@@ -306,7 +348,7 @@ class TTSService(BaseTTSService):
         Returns:
             TTSResult with audio file path
         """
-        url = self.base_url.rstrip("/")
+        url = self._get_provider_base_url("piper")
 
         # Select voice dynamically from Piper TTS API
         voice = await self._get_voice_for_language(language)
@@ -341,17 +383,78 @@ class TTSService(BaseTTSService):
                 audio_url=audio_url,
                 success=True,
             )
-        except httpx.TimeoutException:
-            logger.error(f"Piper TTS timeout after {self.timeout}s")
-            return TTSResult(
-                success=False,
-                error=f"Piper TTS timeout after {self.timeout}s",
-            )
         except httpx.HTTPError as e:
             logger.error(f"Piper TTS HTTP error: {e}")
             return TTSResult(
                 success=False,
                 error=f"Piper TTS HTTP error: {e}",
+            )
+
+    def _get_supertonic_voice_for_language(self, language: str) -> str:
+        """Return Supertonic voice style for a language."""
+        provider_config = self._get_provider_config("supertonic")
+        voices = provider_config.get("voices", {})
+        normalized_language, lang_base = self._normalize_language(language)
+        return voices.get(
+            normalized_language,
+            voices.get(lang_base, provider_config.get("voice", "M1")),
+        )
+
+    async def _supertonic_synthesize(
+        self, text: str, language: str, output_path: Optional[Path] = None
+    ) -> TTSResult:
+        """Synthesize speech using a Supertonic TTS HTTP server."""
+        provider_config = self._get_provider_config("supertonic")
+        normalized_language, lang_base = self._normalize_language(language)
+        voice = self._get_supertonic_voice_for_language(language)
+        url = self._get_provider_base_url("supertonic") + "/v1/tts"
+
+        payload = {
+            "text": text,
+            "voice": voice,
+            "lang": lang_base,
+            "steps": self._config_int(provider_config.get("steps"), 8),
+            "speed": self._config_float(provider_config.get("speed"), 1.05),
+            "response_format": provider_config.get("response_format", "wav"),
+        }
+
+        try:
+            async with self._http_client.stream("POST", url, json=payload) as response:
+                response.raise_for_status()
+
+                if output_path is None:
+                    unique_id = str(uuid.uuid4())[:8]
+                    output_path = (
+                        self.media_dir / f"tts_{normalized_language}_{unique_id}.wav"
+                    )
+
+                output_path.parent.mkdir(parents=True, exist_ok=True)
+
+                with open(output_path, "wb") as f:
+                    async for chunk in response.aiter_bytes():
+                        if chunk:
+                            f.write(chunk)
+
+                audio_url = f"/media/output/{output_path.name}"
+                duration_header = response.headers.get("X-Audio-Duration")
+                duration = float(duration_header) if duration_header else None
+
+                logger.info(
+                    f"Supertonic TTS generated: {output_path} "
+                    f"(lang: {lang_base}, voice: {voice})"
+                )
+
+                return TTSResult(
+                    audio_path=output_path,
+                    audio_url=audio_url,
+                    duration=duration,
+                    success=True,
+                )
+        except httpx.HTTPError as e:
+            logger.error(f"Supertonic TTS HTTP error: {e}")
+            return TTSResult(
+                success=False,
+                error=f"Supertonic TTS HTTP error: {e}",
             )
 
     async def _openai_synthesize(
@@ -386,12 +489,6 @@ class TTSService(BaseTTSService):
             response.raise_for_status()
 
             audio_content = response.content
-        except httpx.TimeoutException:
-            logger.error(f"OpenAI TTS timeout after {self.timeout}s")
-            return TTSResult(
-                success=False,
-                error=f"OpenAI TTS timeout after {self.timeout}s",
-            )
         except httpx.HTTPError as e:
             logger.error(f"OpenAI TTS HTTP error: {e}")
             return TTSResult(

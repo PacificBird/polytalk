@@ -64,8 +64,118 @@ class TestTTSServiceInit:
             assert service.provider == "openai"
 
 
+class TestTTSProviderRouting:
+    """Test language-specific TTS provider routing."""
+
+    def test_language_provider_routing(self):
+        """Test Korean and Japanese route to Supertonic."""
+        with patch("app.services.tts_service.get_config") as mock_config:
+            mock_config.return_value.tts = {
+                "enabled": True,
+                "mock_mode": False,
+                "provider": "piper",
+                "base_url": "http://piper:5000",
+                "language_providers": {
+                    "ko": "supertonic",
+                    "ko_KR": "supertonic",
+                    "ja": "supertonic",
+                    "ja_JP": "supertonic",
+                },
+            }
+            mock_config.return_value.app = {}
+            service = TTSService()
+
+            assert service._get_provider_for_language("ko") == "supertonic"
+            assert service._get_provider_for_language("ko-KR") == "supertonic"
+            assert service._get_provider_for_language("ja-JP") == "supertonic"
+            assert service._get_provider_for_language("en") == "piper"
+
+    def test_supertonic_voice_routing(self):
+        """Test Supertonic can use per-language voices."""
+        with patch("app.services.tts_service.get_config") as mock_config:
+            mock_config.return_value.tts = {
+                "enabled": True,
+                "mock_mode": False,
+                "provider": "piper",
+                "providers": {
+                    "supertonic": {
+                        "voice": "M1",
+                        "voices": {"ko": "F1", "ja": "M2"},
+                    }
+                },
+            }
+            mock_config.return_value.app = {}
+            service = TTSService()
+
+            assert service._get_supertonic_voice_for_language("ko-KR") == "F1"
+            assert service._get_supertonic_voice_for_language("ja-JP") == "M2"
+            assert service._get_supertonic_voice_for_language("en") == "M1"
+
+
 class TestTTSSynthesize:
     """Test TTS synthesis methods."""
+
+    @pytest.mark.asyncio
+    async def test_synthesize_supertonic_success(self, tmp_path):
+        """Test synthesis through Supertonic provider routing."""
+        with patch("app.services.tts_service.get_config") as mock_config:
+            mock_config.return_value.tts = {
+                "enabled": True,
+                "mock_mode": False,
+                "provider": "piper",
+                "base_url": "http://piper:5000",
+                "timeout_seconds": 10,
+                "language_providers": {"ko": "supertonic"},
+                "providers": {
+                    "supertonic": {
+                        "base_url": "http://supertonic-tts:7788",
+                        "voice": "M1",
+                        "voices": {"ko": "F1"},
+                        "steps": 6,
+                        "speed": 1.1,
+                        "response_format": "wav",
+                    }
+                },
+            }
+            mock_config.return_value.app = {}
+            mock_config.return_value.media_output_dir = tmp_path
+            service = TTSService()
+
+            response = httpx.Response(
+                200,
+                content=b"RIFFtest",
+                headers={"X-Audio-Duration": "1.25"},
+                request=httpx.Request("POST", "http://supertonic-tts:7788/v1/tts"),
+            )
+
+            class MockStream:
+                async def __aenter__(self):
+                    return response
+
+                async def __aexit__(self, exc_type, exc, traceback):
+                    return None
+
+            service._http_client.stream = MagicMock(return_value=MockStream())
+
+            output_path = tmp_path / "ko.wav"
+            result = await service.synthesize("안녕하세요", "ko-KR", output_path)
+
+            assert result.success is True
+            assert result.audio_path == output_path
+            assert result.duration == 1.25
+            assert output_path.read_bytes() == b"RIFFtest"
+            service._http_client.stream.assert_called_once_with(
+                "POST",
+                "http://supertonic-tts:7788/v1/tts",
+                json={
+                    "text": "안녕하세요",
+                    "voice": "F1",
+                    "lang": "ko",
+                    "steps": 6,
+                    "speed": 1.1,
+                    "response_format": "wav",
+                },
+            )
 
     @pytest.mark.asyncio
     async def test_synthesize_service_disabled(self):

@@ -72,6 +72,22 @@ services:
     networks:
       - polytalk-network
 
+  supertonic-tts:
+    build:
+      context: ./supertonic_tts
+      dockerfile: Dockerfile
+    image: polytalk-supertonic-tts:latest
+    container_name: polytalk-supertonic-tts
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:7788:7788"
+    environment:
+      - XDG_CACHE_HOME=/data/cache
+    volumes:
+      - supertonic_data:/data
+    networks:
+      - polytalk-network
+
   polytalk:
     build:
       context: .
@@ -89,8 +105,14 @@ services:
       - TRANSLATION_API_KEY=${TRANSLATION_API_KEY:-}
       - TRANSLATION_MODEL=${TRANSLATION_MODEL:-gpt-4o-mini}
       - TRANSLATION_MAX_TOKENS=${TRANSLATION_MAX_TOKENS:-160}
-      # TTS service (local Piper)
+      # TTS services
       - TTS_BASE_URL=${TTS_BASE_URL:-http://tts:5000}
+      - SUPERTONIC_TTS_BASE_URL=${SUPERTONIC_TTS_BASE_URL:-http://supertonic-tts:7788}
+      - SUPERTONIC_TTS_VOICE=${SUPERTONIC_TTS_VOICE:-M1}
+      - SUPERTONIC_TTS_JA_VOICE=${SUPERTONIC_TTS_JA_VOICE:-M1}
+      - SUPERTONIC_TTS_KO_VOICE=${SUPERTONIC_TTS_KO_VOICE:-M1}
+      - SUPERTONIC_TTS_STEPS=${SUPERTONIC_TTS_STEPS:-8}
+      - SUPERTONIC_TTS_SPEED=${SUPERTONIC_TTS_SPEED:-1.05}
       # Application
       - APP_HOST=0.0.0.0
       - APP_PORT=8000
@@ -114,11 +136,13 @@ services:
     depends_on:
       - stt
       - tts
+      - supertonic-tts
     networks:
       - polytalk-network
 
 volumes:
   stt_data:
+  supertonic_data:
 
 networks:
   polytalk-network:
