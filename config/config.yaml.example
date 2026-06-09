@@ -28,6 +28,23 @@ tts:
   mock_mode: true
   provider: "piper"
   base_url: "${TTS_BASE_URL}"
+  providers:
+    piper:
+      base_url: "${TTS_BASE_URL}"
+    supertonic:
+      base_url: "${SUPERTONIC_TTS_BASE_URL}"
+      voice: "${SUPERTONIC_TTS_VOICE}"
+      steps: "${SUPERTONIC_TTS_STEPS}"
+      speed: "${SUPERTONIC_TTS_SPEED}"
+      response_format: "wav"
+      voices:
+        ja: "${SUPERTONIC_TTS_JA_VOICE}"
+        ko: "${SUPERTONIC_TTS_KO_VOICE}"
+  language_providers:
+    ja: "supertonic"
+    ja_JP: "supertonic"
+    ko: "supertonic"
+    ko_KR: "supertonic"
   voice: "en_GB-jenny_dioco-medium"
   timeout_seconds: 10
   length_scales:
