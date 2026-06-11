@@ -47,6 +47,7 @@ docker run -p 8000:8000 polytalk-stt
 | `STT_EMIT_MIN_CHARS` | `120` | Minimum new transcript text before emitting an update to PolyTalk. Increase this if live chunks are too small. |
 | `STT_EMIT_INTERVAL_SECONDS` | `4.5` | Maximum time to hold pending transcript text before emitting it. |
 | `STT_PAUSE_FLUSH_SECONDS` | `1.2` | Flush and emit the current speech window after this much trailing silence. Set `0` to disable pause flushing. |
+| `STT_LEADING_SILENCE_PREROLL_SECONDS` | `0.2` | Keep this much audio before first detected speech while discarding longer tab-share startup silence. |
 | `STT_SILENCE_RMS_THRESHOLD` | `0.003` | Skip model inference for very quiet audio windows. Raise this if Whisper hallucinates during silence. |
 | `STT_NO_SPEECH_PROB_THRESHOLD` | `0.50` | Drop segments classified as likely no-speech by faster-whisper. |
 | `STT_LOG_PROB_THRESHOLD` | `-1.0` | Drop low-confidence faster-whisper segments. |

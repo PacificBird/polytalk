@@ -1132,6 +1132,202 @@ class TestSTTCadence:
 
         assert stt_main.PAUSE_FLUSH_SECONDS == 1.75
 
+    def test_stt_leading_silence_preroll_default(self):
+        """Test leading silence keeps only a short default pre-roll."""
+        stt_main = load_stt_main_module()
+
+        assert stt_main.LEADING_SILENCE_PREROLL_SECONDS == 0.2
+
+    def test_stt_leading_silence_preroll_env_override(self):
+        """Test leading silence pre-roll is configurable."""
+        stt_main = load_stt_main_module({"STT_LEADING_SILENCE_PREROLL_SECONDS": "0.35"})
+
+        assert stt_main.LEADING_SILENCE_PREROLL_SECONDS == 0.35
+
+    def test_stt_leading_silence_preroll_keeps_recent_audio_only(self):
+        """Test startup silence is bounded before first detected speech."""
+        stt_main = load_stt_main_module()
+        chunks = []
+
+        total_bytes = 0
+        total_bytes = stt_main._append_bounded_audio_preroll(
+            chunks, b"a" * 4, max_bytes=10, current_total_bytes=total_bytes
+        )
+        total_bytes = stt_main._append_bounded_audio_preroll(
+            chunks, b"b" * 4, max_bytes=10, current_total_bytes=total_bytes
+        )
+        total_bytes = stt_main._append_bounded_audio_preroll(
+            chunks, b"c" * 4, max_bytes=10, current_total_bytes=total_bytes
+        )
+
+        assert b"".join(chunks) == b"aabbbbcccc"
+        assert total_bytes == 10
+
+    def test_stt_leading_silence_preroll_can_be_disabled(self):
+        """Test zero pre-roll discards all leading silence."""
+        stt_main = load_stt_main_module()
+        chunks = [b"silence"]
+
+        total_bytes = stt_main._append_bounded_audio_preroll(
+            chunks, b"more", max_bytes=0, current_total_bytes=len(b"silence")
+        )
+
+        assert chunks == []
+        assert total_bytes == 0
+
+    def test_stt_stream_prepends_leading_silence_preroll_before_first_voice(self):
+        """Test stream transcription prepends bounded startup silence to speech."""
+        from fastapi.testclient import TestClient
+
+        stt_main = load_stt_main_module(
+            {
+                "STT_SAMPLE_RATE": "10",
+                "STT_SAMPLE_WIDTH_BYTES": "2",
+                "STT_STREAM_CHUNK_SECONDS": "0.3",
+                "STT_LEADING_SILENCE_PREROLL_SECONDS": "0.2",
+                "STT_EMIT_MIN_CHARS": "1",
+                "STT_TRANSCRIBE_WORKERS": "1",
+            }
+        )
+        captured_audio = []
+        silence = b"\x00\x00" * 2
+        voice = (10000).to_bytes(2, "little", signed=True) * 2
+
+        def fake_process_transcribe_job(model, job):
+            captured_audio.append(job.audio_bytes)
+            return stt_main.TranscribeResult(
+                sequence=job.sequence,
+                transcript="hello",
+                has_speech=True,
+                detected_language="en",
+            )
+
+        stt_main._get_model = lambda: object()
+        stt_main._process_transcribe_job = fake_process_transcribe_job
+
+        with TestClient(stt_main.app) as client:
+            with client.websocket_connect("/v1/stream/transcriptions") as websocket:
+                websocket.send_bytes(silence)
+                websocket.send_bytes(voice)
+                assert websocket.receive_json()["text"] == "hello"
+
+        assert captured_audio == [silence + voice]
+
+    def test_stt_stream_prepends_partial_leading_silence_preroll(self):
+        """Test speech receives partial preroll when voice starts before it fills."""
+        from fastapi.testclient import TestClient
+
+        stt_main = load_stt_main_module(
+            {
+                "STT_SAMPLE_RATE": "10",
+                "STT_SAMPLE_WIDTH_BYTES": "2",
+                "STT_STREAM_CHUNK_SECONDS": "0.4",
+                "STT_LEADING_SILENCE_PREROLL_SECONDS": "0.4",
+                "STT_EMIT_MIN_CHARS": "1",
+                "STT_TRANSCRIBE_WORKERS": "1",
+            }
+        )
+        captured_audio = []
+        silence = b"\x00\x00" * 1
+        voice = (10000).to_bytes(2, "little", signed=True) * 3
+
+        def fake_process_transcribe_job(model, job):
+            captured_audio.append(job.audio_bytes)
+            return stt_main.TranscribeResult(
+                sequence=job.sequence,
+                transcript="hello",
+                has_speech=True,
+                detected_language="en",
+            )
+
+        stt_main._get_model = lambda: object()
+        stt_main._process_transcribe_job = fake_process_transcribe_job
+
+        with TestClient(stt_main.app) as client:
+            with client.websocket_connect("/v1/stream/transcriptions") as websocket:
+                websocket.send_bytes(silence)
+                websocket.send_bytes(voice)
+                assert websocket.receive_json()["text"] == "hello"
+
+        assert captured_audio == [silence + voice]
+
+    def test_stt_stream_skips_preroll_when_voice_starts_immediately(self):
+        """Test stream transcription does not prepend silence without startup silence."""
+        from fastapi.testclient import TestClient
+
+        stt_main = load_stt_main_module(
+            {
+                "STT_SAMPLE_RATE": "10",
+                "STT_SAMPLE_WIDTH_BYTES": "2",
+                "STT_STREAM_CHUNK_SECONDS": "0.2",
+                "STT_LEADING_SILENCE_PREROLL_SECONDS": "0.2",
+                "STT_EMIT_MIN_CHARS": "1",
+                "STT_TRANSCRIBE_WORKERS": "1",
+            }
+        )
+        captured_audio = []
+        voice = (10000).to_bytes(2, "little", signed=True) * 2
+
+        def fake_process_transcribe_job(model, job):
+            captured_audio.append(job.audio_bytes)
+            return stt_main.TranscribeResult(
+                sequence=job.sequence,
+                transcript="hello",
+                has_speech=True,
+                detected_language="en",
+            )
+
+        stt_main._get_model = lambda: object()
+        stt_main._process_transcribe_job = fake_process_transcribe_job
+
+        with TestClient(stt_main.app) as client:
+            with client.websocket_connect("/v1/stream/transcriptions") as websocket:
+                websocket.send_bytes(voice)
+                assert websocket.receive_json()["text"] == "hello"
+
+        assert captured_audio == [voice]
+
+    def test_stt_stream_pause_flush_still_trims_trailing_silence(self):
+        """Test leading-silence preroll does not break pause-flush trimming."""
+        from fastapi.testclient import TestClient
+
+        stt_main = load_stt_main_module(
+            {
+                "STT_SAMPLE_RATE": "10",
+                "STT_SAMPLE_WIDTH_BYTES": "2",
+                "STT_STREAM_CHUNK_SECONDS": "10",
+                "STT_PAUSE_FLUSH_SECONDS": "0.2",
+                "STT_VAD_SPEECH_PAD_MS": "0",
+                "STT_EMIT_MIN_CHARS": "1",
+                "STT_TRANSCRIBE_WORKERS": "1",
+            }
+        )
+        captured_audio = []
+        voice = (10000).to_bytes(2, "little", signed=True) * 2
+        silence = b"\x00\x00" * 2
+
+        def fake_process_transcribe_job(model, job):
+            captured_audio.append(job.audio_bytes)
+            return stt_main.TranscribeResult(
+                sequence=job.sequence,
+                transcript="hello",
+                has_speech=True,
+                detected_language="en",
+                force_emit=job.force_emit,
+            )
+
+        stt_main._get_model = lambda: object()
+        stt_main._process_transcribe_job = fake_process_transcribe_job
+
+        with TestClient(stt_main.app) as client:
+            with client.websocket_connect("/v1/stream/transcriptions") as websocket:
+                websocket.send_bytes(voice)
+                websocket.send_bytes(silence)
+                result = websocket.receive_json()
+
+        assert result["metrics"]["force_emit"] is True
+        assert captured_audio == [voice]
+
     def test_stt_transcribe_job_preserves_pause_force_emit(self):
         """Test pause-flushed jobs remain emit-eligible after inference."""
         stt_main = load_stt_main_module()
