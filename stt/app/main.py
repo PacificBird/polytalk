@@ -60,6 +60,9 @@ TRANSCRIBE_QUEUE_SIZE = int(os.environ.get("STT_TRANSCRIBE_QUEUE_SIZE", "8"))
 EMIT_MIN_CHARS = int(os.environ.get("STT_EMIT_MIN_CHARS", "40"))
 EMIT_INTERVAL_SECONDS = float(os.environ.get("STT_EMIT_INTERVAL_SECONDS", "2.0"))
 PAUSE_FLUSH_SECONDS = float(os.environ.get("STT_PAUSE_FLUSH_SECONDS", "1.0"))
+LEADING_SILENCE_PREROLL_SECONDS = float(
+    os.environ.get("STT_LEADING_SILENCE_PREROLL_SECONDS", "0.2")
+)
 PRELOAD_MODEL = os.environ.get("STT_PRELOAD_MODEL", "true").lower() == "true"
 SILENCE_RMS_THRESHOLD = float(os.environ.get("STT_SILENCE_RMS_THRESHOLD", "0.003"))
 NO_SPEECH_PROB_THRESHOLD = float(os.environ.get("STT_NO_SPEECH_PROB_THRESHOLD", "0.50"))
@@ -215,6 +218,30 @@ def _trim_pause_flush_audio(
     if trim_bytes <= 0 or trim_bytes >= len(audio_bytes):
         return audio_bytes
     return audio_bytes[:-trim_bytes]
+
+
+def _append_bounded_audio_preroll(
+    chunks: list[bytes], audio_data: bytes, max_bytes: int, current_total_bytes: int
+) -> int:
+    """Keep only the most recent audio bytes for pre-speech context."""
+    if max_bytes <= 0:
+        chunks.clear()
+        return 0
+
+    chunks.append(audio_data)
+    current_total_bytes += len(audio_data)
+    while chunks and current_total_bytes > max_bytes:
+        overflow_bytes = current_total_bytes - max_bytes
+        first_chunk = chunks[0]
+        if len(first_chunk) <= overflow_bytes:
+            current_total_bytes -= len(first_chunk)
+            chunks.pop(0)
+            continue
+
+        chunks[0] = first_chunk[overflow_bytes:]
+        current_total_bytes -= overflow_bytes
+
+    return current_total_bytes
 
 
 def _build_wav_buffer(audio_bytes: bytes) -> io.BytesIO:
@@ -490,6 +517,14 @@ async def stream_transcription(
         nonlocal current_language, current_task, total_size, next_sequence
         current_window_has_voice = False
         trailing_silence_bytes = 0
+        leading_silence_preroll_chunks: list[bytes] = []
+        leading_silence_preroll_total_bytes = 0
+        leading_silence_preroll_bytes = int(
+            LEADING_SILENCE_PREROLL_SECONDS * bytes_per_second
+        )
+        leading_silence_preroll_bytes -= (
+            leading_silence_preroll_bytes % SAMPLE_WIDTH_BYTES
+        )
         pause_flush_bytes = int(PAUSE_FLUSH_SECONDS * bytes_per_second)
         pause_flush_bytes -= pause_flush_bytes % SAMPLE_WIDTH_BYTES
 
@@ -597,14 +632,41 @@ async def stream_transcription(
                     stop_event.set()
                     break
 
-                audio_chunks.append(audio_data)
+                # This is a total received-byte guard, not the current
+                # audio_chunks buffer size. Startup silence used later as
+                # preroll is already counted here when received.
                 total_size += len(audio_data)
 
-                if _calculate_rms(audio_data) >= SILENCE_RMS_THRESHOLD:
+                audio_rms = _calculate_rms(audio_data)
+                has_voice = audio_rms >= SILENCE_RMS_THRESHOLD
+
+                if not current_window_has_voice and not has_voice:
+                    leading_silence_preroll_total_bytes = _append_bounded_audio_preroll(
+                        leading_silence_preroll_chunks,
+                        audio_data,
+                        leading_silence_preroll_bytes,
+                        leading_silence_preroll_total_bytes,
+                    )
+                    # The active speech window stays empty during startup silence;
+                    # recent silence is kept separately as bounded preroll.
+                    audio_chunks.clear()
+                    continue
+
+                if not current_window_has_voice and has_voice:
+                    if leading_silence_preroll_chunks:
+                        audio_chunks.extend(leading_silence_preroll_chunks)
+                        logger.debug(
+                            "[STT_LEADING_SILENCE] prepended preroll "
+                            f"audio_seconds={leading_silence_preroll_total_bytes / bytes_per_second:.2f}"
+                        )
+                        leading_silence_preroll_chunks.clear()
+                        leading_silence_preroll_total_bytes = 0
                     current_window_has_voice = True
                     trailing_silence_bytes = 0
-                elif current_window_has_voice:
+                elif current_window_has_voice and not has_voice:
                     trailing_silence_bytes += len(audio_data)
+
+                audio_chunks.append(audio_data)
 
                 audio_bytes = b"".join(audio_chunks)
                 should_flush_for_pause = (

@@ -301,8 +301,8 @@ class TestTranslationPipelineService:
             assert pipeline is not None
 
     @pytest.mark.asyncio
-    async def test_translate_method(self):
-        """Test _translate method."""
+    async def test_translation_service_method(self):
+        """Test pipeline exposes the configured translation service."""
         pipeline = TranslationPipelineService(warm_connections=False)
 
         async def mock_translate(*args, **kwargs):
@@ -310,11 +310,12 @@ class TestTranslationPipelineService:
 
         with patch.object(
             pipeline.translation, "translate", side_effect=mock_translate
-        ):
-            result = await pipeline._translate("Hello", "en", "gu")
+        ) as patched_translate:
+            result = await pipeline.translation.translate("Hello", "en", "gu")
 
             assert result.success is True
             assert result.text == "translated"
+            patched_translate.assert_awaited_once_with("Hello", "en", "gu")
 
     @pytest.mark.asyncio
     async def test_synthesize_method(self):
@@ -515,8 +516,8 @@ class TestTranslationPipelineService:
 
             pipeline = TranslationPipelineService(warm_connections=False)
 
-            # Test _translate
-            trans_result = await pipeline._translate("Hello", "en", "gu")
+            # Test translation service access
+            trans_result = await pipeline.translation.translate("Hello", "en", "gu")
             assert trans_result is not None
 
             # Test _synthesize without save_media
@@ -731,9 +732,10 @@ class TestTranslationPipelineService:
                     await pipeline.close()
 
     @pytest.mark.asyncio
-    async def test_translate_helper_method(self):
-        """Test _translate helper method."""
+    async def test_translation_service_accepts_context(self):
+        """Test pipeline translation service receives context-aware calls."""
         pipeline = TranslationPipelineService(warm_connections=False)
+        context = [{"source": "Hi", "target": "Hallo"}]
 
         async def mock_translate(*args, **kwargs):
             return MagicMock(
@@ -745,11 +747,16 @@ class TestTranslationPipelineService:
 
         with patch.object(
             pipeline.translation, "translate", side_effect=mock_translate
-        ):
-            result = await pipeline._translate("Hello", "en", "gu")
+        ) as patched_translate:
+            result = await pipeline.translation.translate(
+                "Hello", "en", "gu", context=context
+            )
 
             assert result.success is True
             assert result.text == "translated"
+            patched_translate.assert_awaited_once_with(
+                "Hello", "en", "gu", context=context
+            )
 
     @pytest.mark.asyncio
     async def test_process_streaming_asr_error(self):
