@@ -6,6 +6,7 @@ Utils package.
 """
 
 from .logger import get_logger, setup_file_logger
+from .config import parse_bool_config
 from .audio import (
     convert_webm_to_wav,
     create_wav_header,
@@ -17,6 +18,7 @@ from .audio import (
 __all__ = [
     "get_logger",
     "setup_file_logger",
+    "parse_bool_config",
     "convert_webm_to_wav",
     "create_wav_header",
     "estimate_audio_duration",

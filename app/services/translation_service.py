@@ -8,12 +8,13 @@ Supports both real API and mock mode for testing.
 """
 
 
-from typing import Any
+from typing import Any, Optional
 
 import httpx
 
 from .base import BaseTranslationService, TranslationResult
 from ..config import get_config
+from ..utils.config import parse_bool_config
 from ..utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -87,6 +88,9 @@ class TranslationService(BaseTranslationService):
         self.api_key = _config_value(self.config.get("api_key"), "")
         self.model = _config_value(self.config.get("model"), "qwen3-8b")
         self.temperature = self.config.get("temperature", 0.1)
+        self.context_enabled = parse_bool_config(
+            self.config.get("context_enabled"), True
+        )
         try:
             self.max_tokens = int(self.config.get("max_tokens", 240))
         except (TypeError, ValueError):
@@ -106,14 +110,25 @@ class TranslationService(BaseTranslationService):
             ),
         )
 
+        try:
+            self.context_payload_warn_chars = int(
+                self.config.get("context_payload_warn_chars", 2000)
+            )
+        except (TypeError, ValueError):
+            self.context_payload_warn_chars = 2000
+
         logger.info(
             "TranslationService initialized: "
             f"enabled={self.enabled}, mock_mode={self.mock_mode}, "
-            f"api_format={self.api_format}"
+            f"api_format={self.api_format}, context_enabled={self.context_enabled}"
         )
 
     async def translate(
-        self, text: str, source_language: str, target_language: str
+        self,
+        text: str,
+        source_language: str,
+        target_language: str,
+        context: Optional[list[dict[str, str]]] = None,
     ) -> TranslationResult:
         """
         Translate text from source to target language.
@@ -122,6 +137,8 @@ class TranslationService(BaseTranslationService):
             text: Text to translate
             source_language: Source language code
             target_language: Target language code
+            context: Optional prior source/target translations to use as
+                read-only context
 
         Returns:
             TranslationResult with translated text
@@ -141,7 +158,9 @@ class TranslationService(BaseTranslationService):
             return self._mock_translate(text, source_language, target_language)
 
         try:
-            return await self._real_translate(text, source_language, target_language)
+            return await self._real_translate(
+                text, source_language, target_language, context=context
+            )
         except Exception as e:
             logger.error(f"Translation failed: {e}")
             return TranslationResult(
@@ -221,8 +240,54 @@ class TranslationService(BaseTranslationService):
             headers["Authorization"] = f"Bearer {self.api_key}"
         return headers
 
+    def _format_contextual_user_text(
+        self, text: str, context: Optional[list[dict[str, str]]]
+    ) -> str:
+        if not self.context_enabled or not context:
+            return text
+
+        context_lines = []
+        for index, item in enumerate(context, start=1):
+            source = str(item.get("source", "")).strip()
+            target = str(item.get("target", "")).strip()
+            if not source and not target:
+                continue
+            context_lines.append(f"{index}. Source: {source}\n   Translation: {target}")
+
+        if not context_lines:
+            return text
+
+        previous_context = "\n".join(context_lines)
+        return (
+            "Previous conversation context for reference only:\n"
+            f"{previous_context}\n\n"
+            "Current text to translate. Translate only this current text; do not "
+            "repeat or retranslate the previous context:\n"
+            f"{text}"
+        )
+
+    def _build_contextual_system_prompt(
+        self,
+        source_language: str,
+        target_language: str,
+        context: Optional[list[dict[str, str]]],
+    ) -> str:
+        system_prompt = self._build_system_prompt(source_language, target_language)
+        if not self.context_enabled or not context:
+            return system_prompt
+        return (
+            f"{system_prompt}\n\nUse previous conversation context only to resolve "
+            "pronouns, references, terminology, tone, and fragmented meaning. "
+            "Translate only the current text. Do not repeat, summarize, or "
+            "retranslate previous context."
+        )
+
     def _build_translation_request(
-        self, text: str, source_language: str, target_language: str
+        self,
+        text: str,
+        source_language: str,
+        target_language: str,
+        context: Optional[list[dict[str, str]]] = None,
     ) -> tuple[str, dict[str, str], dict[str, Any]]:
         """Build provider-specific request details for a translation call."""
         api_format = self.api_format
@@ -232,7 +297,21 @@ class TranslationService(BaseTranslationService):
                 f"Unsupported translation api_format '{api_format}'. Use one of: {supported}"
             )
 
-        system_prompt = self._build_system_prompt(source_language, target_language)
+        system_prompt = self._build_contextual_system_prompt(
+            source_language, target_language, context
+        )
+        user_text = self._format_contextual_user_text(text, context)
+        prompt_chars = len(system_prompt) + len(user_text)
+        if (
+            self.context_payload_warn_chars > 0
+            and prompt_chars > self.context_payload_warn_chars
+        ):
+            logger.warning(
+                "Translation prompt payload is large: "
+                f"chars={prompt_chars} threshold={self.context_payload_warn_chars} "
+                f"system_chars={len(system_prompt)} user_chars={len(user_text)} "
+                f"context_items={len(context or [])}"
+            )
         url = self._build_url()
 
         if api_format == "openai_chat":
@@ -240,7 +319,7 @@ class TranslationService(BaseTranslationService):
                 "model": self.model,
                 "messages": [
                     {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": text},
+                    {"role": "user", "content": user_text},
                 ],
                 "temperature": self.temperature,
                 "max_tokens": self.max_tokens,
@@ -251,7 +330,7 @@ class TranslationService(BaseTranslationService):
             payload = {
                 "model": self.model,
                 "instructions": system_prompt,
-                "input": text,
+                "input": user_text,
                 "temperature": self.temperature,
                 "max_output_tokens": self.max_tokens,
             }
@@ -266,7 +345,7 @@ class TranslationService(BaseTranslationService):
             payload = {
                 "model": self.model,
                 "system": system_prompt,
-                "messages": [{"role": "user", "content": text}],
+                "messages": [{"role": "user", "content": user_text}],
                 "temperature": self.temperature,
                 "max_tokens": self.max_tokens,
             }
@@ -278,7 +357,7 @@ class TranslationService(BaseTranslationService):
         payload = {
             "systemInstruction": {"parts": [{"text": system_prompt}]},
             "contents": [
-                {"role": "user", "parts": [{"text": text}]},
+                {"role": "user", "parts": [{"text": user_text}]},
             ],
             "generationConfig": {
                 "temperature": self.temperature,
@@ -337,7 +416,11 @@ class TranslationService(BaseTranslationService):
         raise ValueError(f"Unsupported translation api_format '{api_format}'")
 
     async def _real_translate(
-        self, text: str, source_language: str, target_language: str
+        self,
+        text: str,
+        source_language: str,
+        target_language: str,
+        context: Optional[list[dict[str, str]]] = None,
     ) -> TranslationResult:
         """
         Translate text using the configured real translation API format.
@@ -346,12 +429,14 @@ class TranslationService(BaseTranslationService):
             text: Text to translate
             source_language: Source language code
             target_language: Target language code
+            context: Optional prior source/target translations to use as
+                read-only context
 
         Returns:
             TranslationResult with translated text
         """
         url, headers, payload = self._build_translation_request(
-            text, source_language, target_language
+            text, source_language, target_language, context=context
         )
 
         response = await self._http_client.post(url, headers=headers, json=payload)

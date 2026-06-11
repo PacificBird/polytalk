@@ -109,7 +109,11 @@ class BaseTranslationService(ABC):
 
     @abstractmethod
     async def translate(
-        self, text: str, source_language: str, target_language: str
+        self,
+        text: str,
+        source_language: str,
+        target_language: str,
+        context: Optional[list[dict[str, str]]] = None,
     ) -> TranslationResult:
         """
         Translate text from source to target language.
@@ -118,6 +122,8 @@ class BaseTranslationService(ABC):
             text: Text to translate
             source_language: Source language code
             target_language: Target language code
+            context: Optional prior source/target translations to use as
+                read-only context
 
         Returns:
             TranslationResult with translated text
