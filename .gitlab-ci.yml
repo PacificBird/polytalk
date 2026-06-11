@@ -1,0 +1,46 @@
+# GitLab CI pipeline for pre-commit checks and tests
+image: python:3.10
+
+variables:
+  PIP_CACHE_DIR: "$CI_PROJECT_DIR/.pip"
+
+cache:
+  paths:
+    - .pip/
+    - .coverage
+    - htmlcov/
+    - coverage.xml
+
+before_script:
+  - pip install --upgrade pip
+  - pip install -r requirements.txt
+  - pip install pre-commit pytest pytest-cov pytest-asyncio
+
+stages:
+  - check
+  - test
+
+pre-commit-check:
+  stage: check
+  script:
+    - pre-commit run --all-files
+  rules:
+    - if: $CI_PIPELINE_SOURCE == 'merge_request_event'
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+
+test:
+  stage: test
+  script:
+    - pytest tests/ -v --cov=app --cov-report=term --cov-report=xml --cov-report=html
+  coverage: '/TOTAL.*?(\d+(?:\.\d+)?)%/'
+  artifacts:
+    reports:
+      coverage_report:
+        coverage_format: cobertura
+        path: coverage.xml
+    paths:
+      - coverage.xml
+      - htmlcov/
+  rules:
+    - if: $CI_PIPELINE_SOURCE == 'merge_request_event'
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
