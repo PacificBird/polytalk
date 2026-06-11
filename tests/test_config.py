@@ -45,6 +45,18 @@ class TestConfig:
         assert config.app is not None
         assert "host" in config.app
 
+    def test_parse_bool_config_values(self):
+        """Test shared boolean config parsing helper."""
+        from app.utils.config import parse_bool_config
+
+        assert parse_bool_config(True, False) is True
+        assert parse_bool_config(1, False) is True
+        assert parse_bool_config(0, True) is False
+        assert parse_bool_config("yes", False) is True
+        assert parse_bool_config("OFF", True) is False
+        assert parse_bool_config(2, True) is True
+        assert parse_bool_config("unexpected", True) is True
+
     def test_config_env_expansion(self):
         """Test environment variable expansion."""
         import os

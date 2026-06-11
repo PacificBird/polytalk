@@ -326,6 +326,105 @@ class TestServices:
         assert payload["messages"][0]["role"] == "system"
         assert payload["messages"][1] == {"role": "user", "content": "Hello"}
 
+    def test_translation_builds_contextual_openai_chat_request(self):
+        """Test context is included only as read-only translation history."""
+        from app.services.translation_service import TranslationService
+
+        service = TranslationService()
+        service.api_format = "openai_chat"
+        service.base_url = "https://api.openai.com"
+        service.endpoint = "/v1/chat/completions"
+        service.api_key = "test-key"
+        service.model = "gpt-4o-mini"
+        service.temperature = 0.0
+        service.max_tokens = 123
+        service.context_enabled = True
+        service.system_prompt_template = (
+            "Translate {source_language} to {target_language}."
+        )
+
+        _, _, payload = service._build_translation_request(
+            "It is ready.",
+            "en",
+            "gu",
+            context=[{"source": "The order arrived.", "target": "ઓર્ડર આવી ગયો."}],
+        )
+
+        system_prompt = payload["messages"][0]["content"]
+        user_text = payload["messages"][1]["content"]
+
+        assert "previous conversation context" in user_text.lower()
+        assert "The order arrived." in user_text
+        assert "ઓર્ડર આવી ગયો." in user_text
+        assert "It is ready." in user_text
+        assert "Translate only the current text" in system_prompt
+
+    def test_translation_warns_for_large_context_payload(self, caplog):
+        """Test large contextual payloads log sizes without prompt contents."""
+        from app.services.translation_service import TranslationService
+
+        service = TranslationService()
+        service.api_format = "openai_chat"
+        service.base_url = "https://api.openai.com"
+        service.endpoint = "/v1/chat/completions"
+        service.api_key = "test-key"
+        service.model = "gpt-4o-mini"
+        service.temperature = 0.0
+        service.max_tokens = 123
+        service.context_enabled = True
+        service.context_payload_warn_chars = 10
+        service.system_prompt_template = (
+            "Translate {source_language} to {target_language}."
+        )
+
+        with caplog.at_level("WARNING"):
+            service._build_translation_request(
+                "It is ready.",
+                "en",
+                "gu",
+                context=[
+                    {
+                        "source": "The order arrived.",
+                        "target": "ઓર્ડર આવી ગયો.",
+                    }
+                ],
+            )
+
+        assert "Translation prompt payload is large" in caplog.text
+        assert "system_chars=" in caplog.text
+        assert "user_chars=" in caplog.text
+        assert "The order arrived." not in caplog.text
+
+    def test_translation_omits_context_when_disabled(self):
+        """Test disabled context preserves the plain provider payload."""
+        from app.services.translation_service import TranslationService
+
+        service = TranslationService()
+        service.api_format = "openai_chat"
+        service.base_url = "https://api.openai.com"
+        service.endpoint = "/v1/chat/completions"
+        service.api_key = "test-key"
+        service.model = "gpt-4o-mini"
+        service.temperature = 0.0
+        service.max_tokens = 123
+        service.context_enabled = False
+        service.system_prompt_template = (
+            "Translate {source_language} to {target_language}."
+        )
+
+        _, _, payload = service._build_translation_request(
+            "It is ready.",
+            "en",
+            "gu",
+            context=[{"source": "The order arrived.", "target": "ઓર્ડર આવી ગયો."}],
+        )
+
+        assert payload["messages"][1] == {
+            "role": "user",
+            "content": "It is ready.",
+        }
+        assert "previous context" not in payload["messages"][0]["content"].lower()
+
     def test_translation_builds_openai_responses_request(self):
         """Test OpenAI Responses request construction."""
         from app.services.translation_service import TranslationService
@@ -681,7 +780,9 @@ class TestServices:
             def __init__(self):
                 self.calls = []
 
-            async def translate(self, text, source_language, target_language):
+            async def translate(
+                self, text, source_language, target_language, context=None
+            ):
                 self.calls.append((text, source_language, target_language))
                 return TranslationResult(
                     text="hello everyone.",
@@ -755,7 +856,9 @@ class TestServices:
             def __init__(self):
                 self.calls = []
 
-            async def translate(self, text, source_language, target_language):
+            async def translate(
+                self, text, source_language, target_language, context=None
+            ):
                 self.calls.append((text, source_language, target_language))
                 return TranslationResult(
                     text="Werken aan",
@@ -799,6 +902,97 @@ class TestServices:
         translation_calls = asyncio.run(run_pipeline())
 
         assert translation_calls == [("Working on", "en", "nl")]
+
+    def test_pipeline_passes_prior_translation_context(self):
+        """Test later translation chunks receive bounded prior context."""
+        from app.services.base import TranscriptionResult, TranslationResult, TTSResult
+        from app.services.pipeline_service import TranslationPipelineService
+
+        class FakeWhisperService:
+            mock_mode = True
+
+            async def stream_transcribe(self, audio_generator, language=None):
+                yield TranscriptionResult(
+                    text="The order arrived.",
+                    language="en",
+                    success=True,
+                    is_partial=True,
+                )
+                yield TranscriptionResult(
+                    text="The order arrived. It is ready.",
+                    language="en",
+                    success=True,
+                    is_partial=False,
+                )
+
+            async def close(self):
+                return None
+
+        class FakeTranslationService:
+            mock_mode = True
+
+            def __init__(self):
+                self.calls = []
+
+            async def translate(
+                self, text, source_language, target_language, context=None
+            ):
+                copied_context = [dict(item) for item in context] if context else None
+                self.calls.append(
+                    (text, source_language, target_language, copied_context)
+                )
+                translated = {
+                    "The order arrived.": "ઓર્ડર આવી ગયો.",
+                    "It is ready.": "તે તૈયાર છે.",
+                }[text]
+                return TranslationResult(
+                    text=translated,
+                    source_language=source_language,
+                    target_language=target_language,
+                    success=True,
+                )
+
+            async def close(self):
+                return None
+
+        class FakeTTSService:
+            mock_mode = True
+
+            async def synthesize(self, text, language, output_path=None):
+                return TTSResult(audio_url="/fake.wav", success=True)
+
+            async def close(self):
+                return None
+
+        async def audio_generator():
+            yield b"audio"
+
+        async def run_pipeline():
+            translation = FakeTranslationService()
+            pipeline = TranslationPipelineService(
+                whisper_service=FakeWhisperService(),
+                translation_service=translation,
+                tts_service=FakeTTSService(),
+                warm_connections=False,
+            )
+            async for _ in pipeline.process_streaming(
+                audio_generator(),
+                source_language="en",
+                target_language="gu",
+                save_media=False,
+            ):
+                pass
+            return translation.calls
+
+        translation_calls = asyncio.run(run_pipeline())
+
+        assert translation_calls[0] == ("The order arrived.", "en", "gu", None)
+        assert translation_calls[1] == (
+            "It is ready.",
+            "en",
+            "gu",
+            [{"source": "The order arrived.", "target": "ઓર્ડર આવી ગયો."}],
+        )
 
     def test_pipeline_extracts_simple_cumulative_delta(self):
         """Test cumulative STT growth returns only newly appended text."""

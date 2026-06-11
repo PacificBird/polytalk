@@ -211,6 +211,10 @@ translation:
   model: "${TRANSLATION_MODEL}"
   temperature: 0.0
   max_tokens: "${TRANSLATION_MAX_TOKENS}"
+  context_enabled: true
+  context_max_chunks: 4
+  context_max_chars: 1200
+  context_payload_warn_chars: 2000
 ```
 
 #### TTS (Text-to-Speech)
@@ -301,6 +305,10 @@ The main latency knobs are:
 | `app.translation_flush_min_chars` | `120` | Minimum text required for time-based translation flushing. |
 | `translation.model` | `qwen3-8b` | Use a model supported by your provider or self-hosted server, such as qwen3-8b, TranslateGama, or another open-source/open-weight model. |
 | `translation.max_tokens` | `240` | Maximum translation output tokens. Keep bounded for live streaming, but allow enough room for Indic-script targets and longer sentence buffers. |
+| `translation.context_enabled` | `true` | Send recent successful source/target translation pairs as read-only context for later chunks. |
+| `translation.context_max_chunks` | `4` | Maximum previous translation chunks kept in per-session context. |
+| `translation.context_max_chars` | `1200` | Maximum source plus translated characters kept in per-session context. |
+| `translation.context_payload_warn_chars` | `2000` | Log a warning when final system plus user prompt text exceeds this many characters. Set `0` to disable. |
 | `tts.timeout_seconds` | `10` | Maximum wait for TTS generation. |
 | `TTS_WORKERS` | `4` | Number of Piper Gunicorn workers. Keep `2-4` on small hosts; raise toward `min(8, CPU cores)` only after CPU and memory headroom are confirmed. |
 

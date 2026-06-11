@@ -21,6 +21,10 @@ translation:
   model: "${TRANSLATION_MODEL}"
   temperature: 0.0
   max_tokens: "${TRANSLATION_MAX_TOKENS}"
+  context_enabled: true
+  context_max_chunks: 4
+  context_max_chars: 1200
+  context_payload_warn_chars: 2000
   system_prompt: "You are a professional translator. Translate from {source_language} to {target_language}. Write natural, fluent {target_language}. Preserve the meaning only; do not add explanations, summaries, repeated text, or source-language commentary. If the source transcript is fragmented, translate the intended meaning as faithfully as possible. Return ONLY the translation."
 
 tts:

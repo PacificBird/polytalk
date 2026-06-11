@@ -14,7 +14,7 @@ Optimizations:
 import asyncio
 import re
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional, AsyncGenerator
 
 from .base import TranslationResult, TTSResult
@@ -22,6 +22,7 @@ from .whisper_service import WhisperService
 from .translation_service import TranslationService
 from .tts_service import TTSService
 from ..config import get_config
+from ..utils.config import parse_bool_config
 from ..utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -34,6 +35,46 @@ class TranslatedSentence:
     text: str
     sequence: int
     queued_at: float = 0.0
+
+
+@dataclass
+class TranslationContextWindow:
+    """Bounded per-stream source/target context for translation prompts."""
+
+    enabled: bool
+    max_chunks: int
+    max_chars: int
+    items: list[dict[str, str]] = field(default_factory=list)
+
+    def snapshot(self) -> Optional[list[dict[str, str]]]:
+        if not self.enabled or not self.items:
+            return None
+        return [dict(item) for item in self.items]
+
+    def remember(self, source_text: str, translated_text: str) -> None:
+        if not self.enabled or self.max_chunks <= 0 or self.max_chars <= 0:
+            return
+
+        source_text = " ".join(source_text.strip().split())
+        translated_text = " ".join(translated_text.strip().split())
+        if not source_text or not translated_text:
+            return
+
+        self.items.append({"source": source_text, "target": translated_text})
+        while len(self.items) > self.max_chunks:
+            self.items.pop(0)
+
+        while self._char_count() > self.max_chars and len(self.items) > 1:
+            self.items.pop(0)
+
+    def clear(self) -> None:
+        self.items.clear()
+
+    def _char_count(self) -> int:
+        return sum(
+            len(item.get("source", "")) + len(item.get("target", ""))
+            for item in self.items
+        )
 
 
 class TranslationPipelineService:
@@ -111,22 +152,6 @@ class TranslationPipelineService:
     async def warm_connections(self) -> None:
         """Warm provider connections that can be safely prepared before audio."""
         await self._warm_connections()
-
-    async def _translate(
-        self, text: str, source_language: str, target_language: str
-    ) -> TranslationResult:
-        """
-        Translate text.
-
-        Args:
-            text: Text to translate
-            source_language: Source language code
-            target_language: Target language code
-
-        Returns:
-            TranslationResult
-        """
-        return await self.translation.translate(text, source_language, target_language)
 
     async def _synthesize(
         self, text: str, language: str, save_media: bool
@@ -282,11 +307,19 @@ class TranslationPipelineService:
         # Get language swap delay from config (default 200ms)
         from ..config import get_config
 
-        app_config = get_config().app
+        config = get_config()
+        app_config = config.app
+        translation_config = config.translation
 
         def int_config(key: str, default: int) -> int:
             try:
                 return int(app_config.get(key, default))
+            except (TypeError, ValueError):
+                return default
+
+        def translation_int_config(key: str, default: int) -> int:
+            try:
+                return int(translation_config.get(key, default))
             except (TypeError, ValueError):
                 return default
 
@@ -301,6 +334,15 @@ class TranslationPipelineService:
         translation_flush_chars = int_config("translation_flush_chars", 120)
         translation_flush_seconds = float_config("translation_flush_seconds", 2.0)
         translation_flush_min_chars = int_config("translation_flush_min_chars", 40)
+        translation_context_enabled = parse_bool_config(
+            translation_config.get("context_enabled"), True
+        )
+        translation_context_max_chunks = max(
+            0, translation_int_config("context_max_chunks", 4)
+        )
+        translation_context_max_chars = max(
+            0, translation_int_config("context_max_chars", 1200)
+        )
 
         # Create queues (maxsize=100 for safety, but effectively unlimited)
         trans_queue = asyncio.Queue(maxsize=100)  # ASR → Translation
@@ -513,6 +555,11 @@ class TranslationPipelineService:
             # Local buffer for this streaming session (thread-safe)
             translation_buffer = ""
             translation_buffer_started_at = None
+            translation_context = TranslationContextWindow(
+                enabled=translation_context_enabled,
+                max_chunks=translation_context_max_chunks,
+                max_chars=translation_context_max_chars,
+            )
 
             async def enqueue_tts(text: str, sequence: int) -> None:
                 await tts_queue.put(
@@ -542,12 +589,14 @@ class TranslationPipelineService:
                     f"'{remaining_text[:80]}...'"
                 )
                 try:
-                    result = await self._translate(
+                    result = await self.translation.translate(
                         remaining_text,
                         translation_source_lang,
                         target_lang,
+                        context=translation_context.snapshot(),
                     )
                     if result.success:
+                        translation_context.remember(remaining_text, result.text)
                         full_translation += " " + result.text
                         full_translation = full_translation.strip()
                         await result_queue.put(
@@ -647,6 +696,7 @@ class TranslationPipelineService:
                             ]
                             target_lang = swap_state["pending"]["target_language"]
                             swap_state["pending"] = None
+                            translation_context.clear()
                         logger.info(
                             f"Language swap applied: {detected_language} -> {target_lang} (delay: {language_swap_delay_ms}ms)"
                         )
@@ -743,10 +793,11 @@ class TranslationPipelineService:
                         for attempt in range(max_retries):
                             attempts_used = attempt + 1
                             try:
-                                result = await self._translate(
+                                result = await self.translation.translate(
                                     text_to_send,
                                     translation_source_lang,
                                     target_lang,
+                                    context=translation_context.snapshot(),
                                 )
                                 if result.success:
                                     break
@@ -786,6 +837,7 @@ class TranslationPipelineService:
                         )
 
                         if result.success:
+                            translation_context.remember(text_to_send, result.text)
                             # Update full translation
                             full_translation += " " + result.text
                             full_translation = full_translation.strip()
@@ -813,11 +865,14 @@ class TranslationPipelineService:
                         await flush_translation_buffer("final transcript")
                         break
 
+                translation_context.clear()
                 await result_queue.put({"type": "complete"})
 
             except asyncio.CancelledError:
+                translation_context.clear()
                 logger.info("Translation worker: cancelled")
             except Exception as e:
+                translation_context.clear()
                 logger.error(f"Translation worker error: {e}")
                 await result_queue.put({"type": "error", "error": str(e)})
 
