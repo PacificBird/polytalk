@@ -29,6 +29,7 @@ class PolyTalkApp {
         this.isMobileDevice = false;
         this.isTabAudioSupported = true;
         this.isApplyingLanguageParams = false;
+        this.visualContextSent = false;
 
         this.initElements();
         this.applyLanguageParamsToView();
@@ -1112,6 +1113,7 @@ class PolyTalkApp {
         this.updateReadinessStage('audio_permission', 'active', 'Opening screen sharing dialog');
         this.updateUIState('connecting');
         this.clearLiveResults();
+        this.visualContextSent = false;
 
         // First, try to get tab audio sharing - this will show the dialog
         try {
@@ -1143,6 +1145,7 @@ class PolyTalkApp {
 
         this.ws.onopen = () => {
             this.updateReadinessStage('server_connected', 'done', 'Server connected');
+            this.sendInitialVisualContext();
         };
 
         this.ws.onmessage = (event) => {
@@ -1160,6 +1163,38 @@ class PolyTalkApp {
             this.isPaused = false;
             this.updateUIState('ready');
         };
+    }
+
+    /**
+     * Capture and send one shared-tab screenshot for session context.
+     */
+    async sendInitialVisualContext() {
+        if (this.sessionStartMode !== 'tab' || this.visualContextSent) {
+            return;
+        }
+        if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+            return;
+        }
+
+        this.visualContextSent = true;
+        this.updateReadinessStage('visual_context', 'active', 'Capturing shared tab context');
+        const screenshot = await this.audioRecorder.captureSharedTabScreenshot();
+        if (!screenshot?.imageDataUrl) {
+            this.updateReadinessStage('visual_context', 'warning', 'Shared tab context unavailable');
+            return;
+        }
+
+        try {
+            this.ws.send(JSON.stringify({
+                type: 'visual_context',
+                image_data_url: screenshot.imageDataUrl,
+                width: screenshot.width,
+                height: screenshot.height
+            }));
+        } catch (error) {
+            console.warn('Failed to send visual context screenshot:', error);
+            this.updateReadinessStage('visual_context', 'warning', 'Shared tab context unavailable');
+        }
     }
 
     /**

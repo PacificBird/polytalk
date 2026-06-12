@@ -301,6 +301,13 @@ The main latency knobs are:
 | `STT_TRANSCRIBE_WORKERS` | `2` | Per-stream STT transcription workers. Use more than 1 only when the GPU has spare compute. |
 | `STT_TRANSCRIBE_QUEUE_SIZE` | `8` | Max queued audio windows per stream before receiver backpressure. |
 | `STT_MODEL_WORKERS` | `2` | faster-whisper/CTranslate2 model workers for concurrent transcribe calls. |
+| `VISUAL_CONTEXT_ENABLED` | empty/false | Enable one-time shared tab/page screenshot summarization when tab audio sharing starts. |
+| `VISUAL_CONTEXT_BASE_URL` | `TRANSLATION_BASE_URL` | Optional separate base URL for the vision-capable visual context provider. |
+| `VISUAL_CONTEXT_API_KEY` | `TRANSLATION_API_KEY` | Optional separate API key for the visual context provider. |
+| `VISUAL_CONTEXT_ENDPOINT` | `TRANSLATION_ENDPOINT` | Optional separate endpoint for the visual context provider. |
+| `VISUAL_CONTEXT_API_FORMAT` | `TRANSLATION_API_FORMAT` | Optional separate API format for the visual context provider. |
+| `VISUAL_CONTEXT_MODEL` | `TRANSLATION_MODEL` | Vision-capable model used to summarize the shared tab/page screenshot. |
+| `VISUAL_CONTEXT_MAX_TOKENS` | `240` | Maximum output tokens for the visual context summary. |
 | `app.translation_flush_chars` | `300` | Translate buffered text once this many characters are available. |
 | `app.translation_flush_seconds` | `5.0` | Translate buffered text after this many seconds if enough text is available. |
 | `app.translation_flush_min_chars` | `120` | Minimum text required for time-based translation flushing. |
@@ -563,3 +570,7 @@ guidance for adding custom provider adapters.
 - Persist `media/output` if generated audio should survive restarts.
 - Treat transcripts, translations, and generated audio as user data.
 - Review AGPL-3.0 obligations before offering a modified hosted service.
+
+### Shared Tab Visual Context
+
+When `VISUAL_CONTEXT_ENABLED=true`, tab-audio sessions capture one browser-approved shared tab/page screenshot after sharing starts. PolyTalk sends the image for immediate summarization and does not store the raw screenshot. The generated summary is used as a translation hint for visible titles, names, labels, and domain vocabulary; spoken audio remains authoritative if it conflicts with the visual hint.

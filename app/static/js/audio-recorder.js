@@ -279,6 +279,63 @@ class AudioRecorder {
     }
 
     /**
+     * Capture a single frame from the shared tab/page display stream.
+     * @param {number} maxWidth - Maximum screenshot width in pixels
+     * @param {number} quality - JPEG quality between 0 and 1
+     * @returns {Promise<Object|null>} - Screenshot data URL and dimensions
+     */
+    async captureSharedTabScreenshot(maxWidth = 1280, quality = 0.72) {
+        const videoTrack = this.originalStream?.getVideoTracks?.()[0];
+        if (!videoTrack || videoTrack.readyState !== 'live') {
+            return null;
+        }
+
+        const video = document.createElement('video');
+        video.muted = true;
+        video.playsInline = true;
+        video.srcObject = new MediaStream([videoTrack]);
+
+        try {
+            await video.play();
+            if (!video.videoWidth || !video.videoHeight) {
+                await new Promise((resolve) => {
+                    video.onloadedmetadata = () => resolve();
+                    setTimeout(resolve, 500);
+                });
+            }
+            await new Promise(resolve => requestAnimationFrame(resolve));
+
+            const settings = videoTrack.getSettings ? videoTrack.getSettings() : {};
+            const sourceWidth = video.videoWidth || settings.width || 1280;
+            const sourceHeight = video.videoHeight || settings.height || 720;
+            if (!sourceWidth || !sourceHeight) {
+                return null;
+            }
+
+            const scale = Math.min(1, maxWidth / sourceWidth);
+            const width = Math.max(1, Math.round(sourceWidth * scale));
+            const height = Math.max(1, Math.round(sourceHeight * scale));
+            const canvas = document.createElement('canvas');
+            canvas.width = width;
+            canvas.height = height;
+            const context = canvas.getContext('2d');
+            context.drawImage(video, 0, 0, width, height);
+
+            return {
+                imageDataUrl: canvas.toDataURL('image/jpeg', quality),
+                width,
+                height
+            };
+        } catch (error) {
+            console.warn('Failed to capture shared tab screenshot:', error);
+            return null;
+        } finally {
+            video.pause();
+            video.srcObject = null;
+        }
+    }
+
+    /**
      * Stop recording audio
      * @returns {Promise<Blob>} - Recorded audio blob
      */

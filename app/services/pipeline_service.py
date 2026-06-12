@@ -275,6 +275,7 @@ class TranslationPipelineService:
         save_media: bool = True,
         pause_event: Optional[asyncio.Event] = None,
         language_swap_queue: Optional[asyncio.Queue] = None,
+        visual_context_queue: Optional[asyncio.Queue] = None,
     ) -> AsyncGenerator[dict, None]:
         """
         Process streaming audio with the real-time translation pipeline.
@@ -295,6 +296,8 @@ class TranslationPipelineService:
             save_media: Whether to save generated media files
             pause_event: Optional asyncio.Event to signal pause (set=paused, clear=resume)
             language_swap_queue: Optional asyncio.Queue for receiving language swap updates
+            visual_context_queue: Optional asyncio.Queue for shared tab/page visual
+                context summary updates
 
         Yields:
             Dictionary with streaming pipeline results
@@ -560,6 +563,29 @@ class TranslationPipelineService:
                 max_chunks=translation_context_max_chunks,
                 max_chars=translation_context_max_chars,
             )
+            visual_context_summary = None
+
+            async def drain_visual_context_updates() -> None:
+                nonlocal visual_context_summary
+                if visual_context_queue is None:
+                    return
+
+                updated = False
+                while True:
+                    try:
+                        summary = visual_context_queue.get_nowait()
+                    except asyncio.QueueEmpty:
+                        break
+                    visual_context_summary = (
+                        " ".join(str(summary or "").split()) or None
+                    )
+                    updated = True
+
+                if updated:
+                    logger.info(
+                        "Visual context summary updated: "
+                        f"chars={len(visual_context_summary or '')}"
+                    )
 
             async def enqueue_tts(text: str, sequence: int) -> None:
                 await tts_queue.put(
@@ -578,6 +604,8 @@ class TranslationPipelineService:
                 nonlocal full_translation, translation_buffer
                 nonlocal translation_buffer_started_at, translation_sequence
 
+                await drain_visual_context_updates()
+
                 remaining_text = translation_buffer.strip()
                 if not remaining_text:
                     return
@@ -594,6 +622,7 @@ class TranslationPipelineService:
                         translation_source_lang,
                         target_lang,
                         context=translation_context.snapshot(),
+                        visual_context=visual_context_summary,
                     )
                     if result.success:
                         translation_context.remember(remaining_text, result.text)
@@ -638,6 +667,7 @@ class TranslationPipelineService:
                     try:
                         msg = await asyncio.wait_for(trans_queue.get(), timeout=0.5)
                     except asyncio.TimeoutError:
+                        await drain_visual_context_updates()
                         if translation_buffer.strip() and translation_buffer_started_at:
                             buffer_age = time.time() - translation_buffer_started_at
                             if buffer_age >= translation_flush_seconds:
@@ -660,6 +690,8 @@ class TranslationPipelineService:
                         )
                         await result_queue.put(msg)
                         continue
+
+                    await drain_visual_context_updates()
 
                     trans_result = msg["result"]
                     asr_translation_queue_wait = (
@@ -798,6 +830,7 @@ class TranslationPipelineService:
                                     translation_source_lang,
                                     target_lang,
                                     context=translation_context.snapshot(),
+                                    visual_context=visual_context_summary,
                                 )
                                 if result.success:
                                     break

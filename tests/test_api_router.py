@@ -5,8 +5,9 @@
 Tests for API router endpoints.
 """
 
+import asyncio
 import json
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from fastapi.testclient import TestClient
@@ -43,6 +44,57 @@ class TestAPIRouter:
         service2 = get_pipeline_service()
         assert service1 is service2
         assert isinstance(service1, TranslationPipelineService)
+
+    @pytest.mark.asyncio
+    async def test_close_visual_context_service_resets_singleton(self):
+        """Test visual context service singleton is closed and reset."""
+        import app.routers.api as api
+
+        fake_service = MagicMock()
+        fake_service.close = AsyncMock()
+        api.visual_context_service = fake_service
+
+        await api.close_visual_context_service()
+
+        fake_service.close.assert_awaited_once()
+        assert api.visual_context_service is None
+
+    @pytest.mark.asyncio
+    async def test_lifespan_closes_visual_context_service(self):
+        """Test app shutdown closes the visual context singleton."""
+        from app.main import lifespan
+
+        with patch(
+            "app.main.close_visual_context_service", new_callable=AsyncMock
+        ) as mock_close:
+            async with lifespan(MagicMock()):
+                pass
+
+        mock_close.assert_awaited_once()
+
+    def test_should_start_visual_context_request(self):
+        """Test server-side visual context duplicate guard."""
+        from app.routers.api import should_start_visual_context_request
+
+        assert (
+            should_start_visual_context_request(
+                "data:image/jpeg;base64,aA==", False, False
+            )
+            is True
+        )
+        assert (
+            should_start_visual_context_request(
+                "data:image/jpeg;base64,aA==", True, False
+            )
+            is False
+        )
+        assert (
+            should_start_visual_context_request(
+                "data:image/jpeg;base64,aA==", False, True
+            )
+            is False
+        )
+        assert should_start_visual_context_request("", False, False) is False
 
 
 class TestWebSocketEndpoint:
@@ -182,6 +234,66 @@ class TestWebSocketEndpoint:
                 pass
 
     @pytest.mark.asyncio
+    async def test_websocket_visual_context_failure_sends_warning_status(self, client):
+        """Test visual context service errors clear the active frontend state."""
+        with (
+            patch("app.routers.api.get_pipeline_service") as mock_get_pipeline,
+            patch("app.routers.api.get_visual_context_service") as mock_get_visual,
+        ):
+            mock_pipeline = MagicMock()
+            mock_pipeline.warm_connections = AsyncMock()
+
+            async def mock_process_streaming(audio_stream, *args, **kwargs):
+                async for chunk in audio_stream:
+                    if chunk == b"__END_SIGNAL__":
+                        break
+                yield {"type": "complete"}
+
+            mock_pipeline.process_streaming = mock_process_streaming
+            mock_get_pipeline.return_value = mock_pipeline
+            mock_get_visual.side_effect = RuntimeError("visual config failed")
+
+            with client.websocket_connect(
+                "/api/ws/translate?source_language=en&target_language=gu"
+            ) as websocket:
+                for _ in range(3):
+                    websocket.receive_json()
+
+                websocket.send_text(
+                    json.dumps(
+                        {
+                            "type": "visual_context",
+                            "image_data_url": "data:image/jpeg;base64,aA==",
+                        }
+                    )
+                )
+
+                statuses = []
+                for _ in range(3):
+                    message = websocket.receive_json()
+                    statuses.append(message)
+                    if (
+                        message.get("type") == "pipeline_status"
+                        and message.get("stage") == "visual_context"
+                        and message.get("status") == "warning"
+                    ):
+                        break
+
+                websocket.send_text(json.dumps({"type": "end"}))
+
+        assert any(
+            message.get("stage") == "visual_context"
+            and message.get("status") == "active"
+            for message in statuses
+        )
+        assert any(
+            message.get("stage") == "visual_context"
+            and message.get("status") == "warning"
+            and message.get("message") == "Shared tab context unavailable"
+            for message in statuses
+        )
+
+    @pytest.mark.asyncio
     async def test_websocket_bytes_message(self, client):
         """Test WebSocket bytes message handling."""
         with patch("app.routers.api.get_pipeline_service") as mock_get_pipeline:
@@ -275,7 +387,6 @@ class TestWebSocketEndpoint:
     @pytest.mark.asyncio
     async def test_websocket_timeout_handling(self, client):
         """Test WebSocket timeout handling."""
-        import asyncio
 
         with patch("app.routers.api.get_pipeline_service") as mock_get_pipeline:
             mock_get_pipeline.return_value = TranslationPipelineService(

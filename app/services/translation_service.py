@@ -129,6 +129,7 @@ class TranslationService(BaseTranslationService):
         source_language: str,
         target_language: str,
         context: Optional[list[dict[str, str]]] = None,
+        visual_context: Optional[str] = None,
     ) -> TranslationResult:
         """
         Translate text from source to target language.
@@ -139,6 +140,8 @@ class TranslationService(BaseTranslationService):
             target_language: Target language code
             context: Optional prior source/target translations to use as
                 read-only context
+            visual_context: Optional shared tab/page visual summary to use as
+                a read-only hint
 
         Returns:
             TranslationResult with translated text
@@ -159,7 +162,11 @@ class TranslationService(BaseTranslationService):
 
         try:
             return await self._real_translate(
-                text, source_language, target_language, context=context
+                text,
+                source_language,
+                target_language,
+                context=context,
+                visual_context=visual_context,
             )
         except Exception as e:
             logger.error(f"Translation failed: {e}")
@@ -241,28 +248,45 @@ class TranslationService(BaseTranslationService):
         return headers
 
     def _format_contextual_user_text(
-        self, text: str, context: Optional[list[dict[str, str]]]
+        self,
+        text: str,
+        context: Optional[list[dict[str, str]]],
+        visual_context: Optional[str] = None,
     ) -> str:
-        if not self.context_enabled or not context:
+        if not self.context_enabled:
             return text
 
+        sections = []
+        visual_context = " ".join((visual_context or "").strip().split())
+        if visual_context:
+            sections.append(
+                "Shared tab/page visual context hint for reference only. "
+                "Do not translate this hint; spoken source text wins if it conflicts:\n"
+                f"{visual_context}"
+            )
+
         context_lines = []
-        for index, item in enumerate(context, start=1):
+        for index, item in enumerate(context or [], start=1):
             source = str(item.get("source", "")).strip()
             target = str(item.get("target", "")).strip()
             if not source and not target:
                 continue
             context_lines.append(f"{index}. Source: {source}\n   Translation: {target}")
 
-        if not context_lines:
+        if context_lines:
+            previous_context = "\n".join(context_lines)
+            sections.append(
+                "Previous conversation context for reference only:\n"
+                f"{previous_context}"
+            )
+
+        if not sections:
             return text
 
-        previous_context = "\n".join(context_lines)
         return (
-            "Previous conversation context for reference only:\n"
-            f"{previous_context}\n\n"
-            "Current text to translate. Translate only this current text; do not "
-            "repeat or retranslate the previous context:\n"
+            "\n\n".join(sections)
+            + "\n\nCurrent text to translate. Translate only this current text; do not "
+            "repeat or retranslate the reference context:\n"
             f"{text}"
         )
 
@@ -271,15 +295,17 @@ class TranslationService(BaseTranslationService):
         source_language: str,
         target_language: str,
         context: Optional[list[dict[str, str]]],
+        visual_context: Optional[str] = None,
     ) -> str:
         system_prompt = self._build_system_prompt(source_language, target_language)
-        if not self.context_enabled or not context:
+        if not self.context_enabled or (not context and not visual_context):
             return system_prompt
         return (
-            f"{system_prompt}\n\nUse previous conversation context only to resolve "
-            "pronouns, references, terminology, tone, and fragmented meaning. "
-            "Translate only the current text. Do not repeat, summarize, or "
-            "retranslate previous context."
+            f"{system_prompt}\n\nUse previous conversation and shared visual context only "
+            "to resolve pronouns, references, terminology, tone, domain vocabulary, "
+            "and fragmented meaning. Treat visual context as a hint only; spoken "
+            "source text wins if there is a conflict. Translate only the current text. "
+            "Do not repeat, summarize, or retranslate previous context."
         )
 
     def _build_translation_request(
@@ -288,6 +314,7 @@ class TranslationService(BaseTranslationService):
         source_language: str,
         target_language: str,
         context: Optional[list[dict[str, str]]] = None,
+        visual_context: Optional[str] = None,
     ) -> tuple[str, dict[str, str], dict[str, Any]]:
         """Build provider-specific request details for a translation call."""
         api_format = self.api_format
@@ -298,9 +325,11 @@ class TranslationService(BaseTranslationService):
             )
 
         system_prompt = self._build_contextual_system_prompt(
-            source_language, target_language, context
+            source_language, target_language, context, visual_context=visual_context
         )
-        user_text = self._format_contextual_user_text(text, context)
+        user_text = self._format_contextual_user_text(
+            text, context, visual_context=visual_context
+        )
         prompt_chars = len(system_prompt) + len(user_text)
         if (
             self.context_payload_warn_chars > 0
@@ -310,7 +339,8 @@ class TranslationService(BaseTranslationService):
                 "Translation prompt payload is large: "
                 f"chars={prompt_chars} threshold={self.context_payload_warn_chars} "
                 f"system_chars={len(system_prompt)} user_chars={len(user_text)} "
-                f"context_items={len(context or [])}"
+                f"context_items={len(context or [])} "
+                f"visual_context_chars={len(visual_context or '')}"
             )
         url = self._build_url()
 
@@ -421,6 +451,7 @@ class TranslationService(BaseTranslationService):
         source_language: str,
         target_language: str,
         context: Optional[list[dict[str, str]]] = None,
+        visual_context: Optional[str] = None,
     ) -> TranslationResult:
         """
         Translate text using the configured real translation API format.
@@ -431,12 +462,18 @@ class TranslationService(BaseTranslationService):
             target_language: Target language code
             context: Optional prior source/target translations to use as
                 read-only context
+            visual_context: Optional shared tab/page visual summary to use as
+                a read-only hint
 
         Returns:
             TranslationResult with translated text
         """
         url, headers, payload = self._build_translation_request(
-            text, source_language, target_language, context=context
+            text,
+            source_language,
+            target_language,
+            context=context,
+            visual_context=visual_context,
         )
 
         response = await self._http_client.post(url, headers=headers, json=payload)
