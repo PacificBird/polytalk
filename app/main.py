@@ -17,6 +17,7 @@ from fastapi.staticfiles import StaticFiles
 
 from .config import get_config
 from .routers import api_router, web_router
+from .routers.api import close_visual_context_service
 from .utils.logger import get_logger
 from .version import __version__
 
@@ -77,8 +78,11 @@ async def lifespan(app: FastAPI):
     logger.info(
         f"Server will be available at http://{get_config().host}:{get_config().port}"
     )
-    yield
-    logger.info("PolyTalk shutting down...")
+    try:
+        yield
+    finally:
+        await close_visual_context_service()
+        logger.info("PolyTalk shutting down...")
 
 
 app = create_app()

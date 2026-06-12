@@ -126,6 +126,11 @@ class Config:
         return self._config.get("translation", {})
 
     @property
+    def visual_context(self) -> dict:
+        """Get shared tab/page visual context configuration."""
+        return self._config.get("visual_context", {})
+
+    @property
     def tts(self) -> dict:
         """Get TTS configuration."""
         return self._config.get("tts", {})
@@ -153,7 +158,11 @@ class Config:
     @property
     def port(self) -> int:
         """Get application port."""
-        return int(self.app.get("port", 8000))
+        value = self.app.get("port", 8000)
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return 8000
 
 
 def get_config() -> Config:

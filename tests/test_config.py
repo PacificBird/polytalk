@@ -31,6 +31,12 @@ class TestConfig:
         assert "translation" in config._config
         assert config._config["translation"].get("base_url") is not None
 
+    def test_config_has_visual_context_section(self):
+        """Test that config exposes visual context settings."""
+        config = Config()
+
+        assert config.visual_context is not None
+
     def test_config_has_tts_section(self):
         """Test that config has TTS section."""
         config = Config()
@@ -92,6 +98,13 @@ class TestConfig:
         assert config.debug is not None
         assert isinstance(config.debug, bool)
         assert isinstance(config.host, str)
+
+    def test_config_port_falls_back_for_unresolved_env_placeholder(self):
+        """Test unresolved APP_PORT placeholders do not break app startup."""
+        config = Config()
+        config._config = {"app": {"port": "${APP_PORT}"}}
+
+        assert config.port == 8000
 
     def test_get_config_function(self):
         """Test get_config function returns Config instance."""

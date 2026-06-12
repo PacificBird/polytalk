@@ -521,3 +521,214 @@ class TestTranslationServiceRealTranslateErrorHandling:
             with patch.object(service._http_client, "post", return_value=mock_response):
                 result = await service.translate("Hello", "en", "gu")
                 assert result.success is False
+
+
+class TestVisualContextService:
+    """Test visual context request construction."""
+
+    def test_openai_chat_visual_context_request_uses_image_url(self):
+        """Test OpenAI chat vision payload includes the screenshot data URL."""
+        from unittest.mock import patch
+
+        from app.services.visual_context_service import VisualContextService
+
+        with patch("app.services.visual_context_service.get_config") as mock_config:
+            mock_config.return_value.visual_context = {
+                "enabled": True,
+                "mock_mode": False,
+                "base_url": "https://api.openai.com",
+                "endpoint": "/v1/chat/completions",
+                "api_format": "openai_chat",
+                "api_key": "test-key",
+                "model": "gpt-4o-mini",
+            }
+            mock_config.return_value.translation = {}
+
+            service = VisualContextService()
+            image_url = "data:image/jpeg;base64,aGVsbG8="
+
+            url, headers, payload = service._build_request(
+                image_url,
+                "Summarize this screenshot.",
+            )
+
+            assert url == "https://api.openai.com/v1/chat/completions"
+            assert headers["Authorization"] == "Bearer test-key"
+            content = payload["messages"][1]["content"]
+            assert content[0]["type"] == "text"
+            assert content[1]["image_url"]["url"] == image_url
+
+    def test_openai_chat_visual_context_disables_thinking_by_default(self):
+        """Test OpenAI chat visual context payload requests no thinking mode."""
+        from unittest.mock import patch
+
+        from app.services.visual_context_service import VisualContextService
+
+        with patch("app.services.visual_context_service.get_config") as mock_config:
+            mock_config.return_value.visual_context = {
+                "enabled": True,
+                "mock_mode": False,
+                "base_url": "https://api.openai.com",
+                "endpoint": "/v1/chat/completions",
+                "api_format": "openai_chat",
+                "api_key": "test-key",
+                "model": "coding-ninja",
+            }
+            mock_config.return_value.translation = {}
+
+            service = VisualContextService()
+            _, _, payload = service._build_request(
+                "data:image/jpeg;base64,aGVsbG8=",
+                "Summarize this screenshot.",
+            )
+
+        assert payload["chat_template_kwargs"] == {"enable_thinking": False}
+
+    def test_openai_chat_visual_context_null_content_returns_empty(self):
+        """Test OpenAI chat visual context parser tolerates null content."""
+        from unittest.mock import patch
+
+        from app.services.visual_context_service import VisualContextService
+
+        with patch("app.services.visual_context_service.get_config") as mock_config:
+            mock_config.return_value.visual_context = {
+                "enabled": True,
+                "mock_mode": False,
+                "api_format": "openai_chat",
+            }
+            mock_config.return_value.translation = {}
+
+            service = VisualContextService()
+            result = service._parse_response(
+                {"choices": [{"message": {"content": None}, "finish_reason": "stop"}]}
+            )
+
+        assert result == ""
+
+    def test_openai_chat_visual_context_list_content_extracts_text(self):
+        """Test OpenAI chat visual context parser handles list content."""
+        from unittest.mock import patch
+
+        from app.services.visual_context_service import VisualContextService
+
+        with patch("app.services.visual_context_service.get_config") as mock_config:
+            mock_config.return_value.visual_context = {
+                "enabled": True,
+                "mock_mode": False,
+                "api_format": "openai_chat",
+            }
+            mock_config.return_value.translation = {}
+
+            service = VisualContextService()
+            result = service._parse_response(
+                {
+                    "choices": [
+                        {
+                            "message": {
+                                "content": [
+                                    {"type": "text", "text": " Shared "},
+                                    {"type": "text", "text": " context "},
+                                ]
+                            }
+                        }
+                    ]
+                }
+            )
+
+        assert result == "Shared  context"
+
+    def test_visual_context_temperature_uses_config_value_fallback(self):
+        """Test visual context temperature ignores unresolved env placeholders."""
+        from app.services.visual_context_service import VisualContextService
+
+        with patch("app.services.visual_context_service.get_config") as mock_config:
+            mock_config.return_value.visual_context = {
+                "enabled": True,
+                "mock_mode": False,
+                "temperature": "${VISUAL_CONTEXT_TEMPERATURE}",
+            }
+            mock_config.return_value.translation = {}
+
+            service = VisualContextService()
+
+        assert service.temperature == 0.0
+
+    @pytest.mark.asyncio
+    async def test_visual_context_retries_transient_api_failure(self):
+        """Test visual context retries transient provider failures."""
+        from app.services.visual_context_service import VisualContextService
+
+        with patch("app.services.visual_context_service.get_config") as mock_config:
+            mock_config.return_value.visual_context = {
+                "enabled": True,
+                "mock_mode": False,
+                "base_url": "https://api.openai.com",
+                "endpoint": "/v1/chat/completions",
+                "api_format": "openai_chat",
+                "api_key": "test-key",
+                "model": "gpt-4o-mini",
+            }
+            mock_config.return_value.translation = {}
+
+            service = VisualContextService()
+            response = MagicMock()
+            response.raise_for_status.return_value = None
+            response.json.return_value = {
+                "choices": [{"message": {"content": "Shared context"}}]
+            }
+
+            with (
+                patch.object(
+                    service._http_client,
+                    "post",
+                    new_callable=AsyncMock,
+                    side_effect=[httpx.HTTPError("temporary"), response],
+                ) as mock_post,
+                patch(
+                    "app.services.visual_context_service.asyncio.sleep",
+                    new_callable=AsyncMock,
+                ) as mock_sleep,
+            ):
+                result = await service.summarize_screenshot(
+                    "data:image/jpeg;base64,aGVsbG8=", "de", "en"
+                )
+
+        assert result == "Shared context"
+        assert mock_post.call_count == 2
+        mock_sleep.assert_awaited_once_with(0.5)
+
+    def test_visual_context_summary_is_trimmed(self):
+        """Test visual context summaries are whitespace-normalized and bounded."""
+        from unittest.mock import patch
+
+        from app.services.visual_context_service import VisualContextService
+
+        with patch("app.services.visual_context_service.get_config") as mock_config:
+            mock_config.return_value.visual_context = {
+                "enabled": True,
+                "mock_mode": True,
+                "max_summary_chars": 10,
+            }
+            mock_config.return_value.translation = {"mock_mode": True}
+
+            service = VisualContextService()
+
+            assert service._trim_summary("  alpha   beta   gamma  ") == "alpha beta"
+
+    def test_visual_context_mock_mode_logs_warning_when_enabled(self, caplog):
+        """Test enabled visual mock mode logs a clear warning."""
+        from unittest.mock import patch
+
+        from app.services.visual_context_service import VisualContextService
+
+        with patch("app.services.visual_context_service.get_config") as mock_config:
+            mock_config.return_value.visual_context = {
+                "enabled": True,
+                "mock_mode": True,
+            }
+            mock_config.return_value.translation = {"mock_mode": True}
+
+            with caplog.at_level("WARNING"):
+                VisualContextService()
+
+        assert "VisualContextService is in mock mode" in caplog.text

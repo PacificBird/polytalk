@@ -19,6 +19,7 @@ from fastapi import (
 )
 
 from ..services.pipeline_service import TranslationPipelineService
+from ..services.visual_context_service import VisualContextService
 from ..utils.logger import get_logger
 from ..version import __version__
 
@@ -27,6 +28,7 @@ logger = get_logger(__name__)
 router = APIRouter(prefix="/api", tags=["api"])
 
 pipeline_service: Optional[TranslationPipelineService] = None
+visual_context_service: Optional[VisualContextService] = None
 
 
 def get_pipeline_service() -> TranslationPipelineService:
@@ -40,6 +42,31 @@ def get_pipeline_service() -> TranslationPipelineService:
     if pipeline_service is None:
         pipeline_service = TranslationPipelineService()
     return pipeline_service
+
+
+def get_visual_context_service() -> VisualContextService:
+    """Get or create the visual context service singleton."""
+    global visual_context_service
+    if visual_context_service is None:
+        visual_context_service = VisualContextService()
+    return visual_context_service
+
+
+async def close_visual_context_service() -> None:
+    """Close and reset the visual context service singleton."""
+    global visual_context_service
+    if visual_context_service is None:
+        return
+
+    await visual_context_service.close()
+    visual_context_service = None
+
+
+def should_start_visual_context_request(
+    image_data_url: str, in_flight: bool, ready: bool
+) -> bool:
+    """Return whether a visual context request should be accepted."""
+    return bool(image_data_url) and not (in_flight or ready)
 
 
 @router.get("/health")
@@ -81,6 +108,10 @@ async def websocket_translate(
     client_disconnected = False
     pause_event = asyncio.Event()
     language_swap_queue = asyncio.Queue()
+    visual_context_queue = asyncio.Queue(maxsize=1)
+    visual_context_tasks: set[asyncio.Task] = set()
+    visual_context_in_flight = False
+    visual_context_ready = False
 
     connection_start = time.time()
     idle_timeout_seconds = 300
@@ -102,7 +133,7 @@ async def websocket_translate(
 
     async def audio_generator() -> AsyncGenerator[bytes, None]:
         """Generate audio chunks from WebSocket messages."""
-        nonlocal client_disconnected, connection_start
+        nonlocal client_disconnected, connection_start, visual_context_in_flight
         is_paused = False
         try:
             while True:
@@ -146,6 +177,21 @@ async def websocket_translate(
                         logger.info(
                             "Client sent 'resume' signal, resuming audio transmission"
                         )
+                    elif data.get("type") == "visual_context":
+                        image_data_url = data.get("image_data_url") or ""
+                        if should_start_visual_context_request(
+                            image_data_url,
+                            visual_context_in_flight,
+                            visual_context_ready,
+                        ):
+                            visual_context_in_flight = True
+                            task = asyncio.create_task(
+                                summarize_visual_context(image_data_url)
+                            )
+                            visual_context_tasks.add(task)
+                            task.add_done_callback(visual_context_tasks.discard)
+                        elif image_data_url:
+                            logger.debug("Ignoring duplicate visual context request")
                     elif data.get("type") == "swap_languages":
                         new_source = data.get("source_language")
                         new_target = data.get("target_language")
@@ -189,6 +235,55 @@ async def websocket_translate(
         except Exception as e:
             logger.debug(f"Error sending result: {e}")
 
+    async def summarize_visual_context(image_data_url: str) -> None:
+        """Summarize a shared tab/page screenshot without blocking audio receive."""
+        nonlocal visual_context_in_flight, visual_context_ready
+        try:
+            await send_pipeline_status(
+                "visual_context",
+                "active",
+                "Reading shared tab context",
+            )
+            service = get_visual_context_service()
+            summary = await service.summarize_screenshot(
+                image_data_url,
+                source_language,
+                target_language,
+            )
+            if not summary:
+                await send_pipeline_status(
+                    "visual_context",
+                    "warning",
+                    "Shared tab context unavailable",
+                )
+                return
+
+            while not visual_context_queue.empty():
+                try:
+                    visual_context_queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    break
+            visual_context_queue.put_nowait(summary)
+            visual_context_ready = True
+            logger.info(
+                "Visual context summary received: "
+                f"chars={len(summary)} summary={summary[:1200]!r}"
+            )
+            await send_pipeline_status(
+                "visual_context",
+                "done",
+                "Shared tab context ready",
+            )
+        except Exception as exc:
+            logger.warning(f"Visual context service call failed: {exc}")
+            await send_pipeline_status(
+                "visual_context",
+                "warning",
+                "Shared tab context unavailable",
+            )
+        finally:
+            visual_context_in_flight = False
+
     audio_gen = audio_generator()
 
     try:
@@ -223,6 +318,7 @@ async def websocket_translate(
             target_language,
             pause_event=pause_event,
             language_swap_queue=language_swap_queue,
+            visual_context_queue=visual_context_queue,
         ):
             if client_disconnected:
                 logger.info("Client disconnected, stopping pipeline")
@@ -255,6 +351,11 @@ async def websocket_translate(
             await audio_gen.aclose()
         except Exception as e:
             logger.error(f"Error closing audio generator: {e}")
+
+        for task in visual_context_tasks:
+            task.cancel()
+        if visual_context_tasks:
+            await asyncio.gather(*visual_context_tasks, return_exceptions=True)
 
         if not client_disconnected:
             try:

@@ -114,6 +114,7 @@ class BaseTranslationService(ABC):
         source_language: str,
         target_language: str,
         context: Optional[list[dict[str, str]]] = None,
+        visual_context: Optional[str] = None,
     ) -> TranslationResult:
         """
         Translate text from source to target language.
@@ -124,6 +125,8 @@ class BaseTranslationService(ABC):
             target_language: Target language code
             context: Optional prior source/target translations to use as
                 read-only context
+            visual_context: Optional shared tab/page visual summary to use as
+                a read-only hint
 
         Returns:
             TranslationResult with translated text

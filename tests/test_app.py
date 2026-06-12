@@ -359,6 +359,39 @@ class TestServices:
         assert "It is ready." in user_text
         assert "Translate only the current text" in system_prompt
 
+    def test_translation_visual_context_is_prompted_as_hint_only(self):
+        """Test shared tab visual context is included as a non-translated hint."""
+        from app.services.translation_service import TranslationService
+
+        service = TranslationService()
+        service.api_format = "openai_chat"
+        service.base_url = "https://api.openai.com"
+        service.endpoint = "/v1/chat/completions"
+        service.api_key = "test-key"
+        service.model = "gpt-4o-mini"
+        service.temperature = 0.0
+        service.max_tokens = 123
+        service.context_enabled = True
+        service.system_prompt_template = (
+            "Translate {source_language} to {target_language}."
+        )
+
+        _, _, payload = service._build_translation_request(
+            "Move it to stock.",
+            "en",
+            "de",
+            visual_context="The shared tab shows an Odoo Inventory Overview page.",
+        )
+
+        system_prompt = payload["messages"][0]["content"]
+        user_text = payload["messages"][1]["content"]
+
+        assert "shared visual context" in system_prompt.lower()
+        assert "spoken source text wins" in system_prompt
+        assert "Shared tab/page visual context hint" in user_text
+        assert "Odoo Inventory Overview" in user_text
+        assert "Move it to stock." in user_text
+
     def test_translation_warns_for_large_context_payload(self, caplog):
         """Test large contextual payloads log sizes without prompt contents."""
         from app.services.translation_service import TranslationService
@@ -781,7 +814,12 @@ class TestServices:
                 self.calls = []
 
             async def translate(
-                self, text, source_language, target_language, context=None
+                self,
+                text,
+                source_language,
+                target_language,
+                context=None,
+                visual_context=None,
             ):
                 self.calls.append((text, source_language, target_language))
                 return TranslationResult(
@@ -857,7 +895,12 @@ class TestServices:
                 self.calls = []
 
             async def translate(
-                self, text, source_language, target_language, context=None
+                self,
+                text,
+                source_language,
+                target_language,
+                context=None,
+                visual_context=None,
             ):
                 self.calls.append((text, source_language, target_language))
                 return TranslationResult(
@@ -935,11 +978,22 @@ class TestServices:
                 self.calls = []
 
             async def translate(
-                self, text, source_language, target_language, context=None
+                self,
+                text,
+                source_language,
+                target_language,
+                context=None,
+                visual_context=None,
             ):
                 copied_context = [dict(item) for item in context] if context else None
                 self.calls.append(
-                    (text, source_language, target_language, copied_context)
+                    (
+                        text,
+                        source_language,
+                        target_language,
+                        copied_context,
+                        visual_context,
+                    )
                 )
                 translated = {
                     "The order arrived.": "ઓર્ડર આવી ગયો.",
@@ -986,13 +1040,97 @@ class TestServices:
 
         translation_calls = asyncio.run(run_pipeline())
 
-        assert translation_calls[0] == ("The order arrived.", "en", "gu", None)
+        assert translation_calls[0] == ("The order arrived.", "en", "gu", None, None)
         assert translation_calls[1] == (
             "It is ready.",
             "en",
             "gu",
             [{"source": "The order arrived.", "target": "ઓર્ડર આવી ગયો."}],
+            None,
         )
+
+    def test_pipeline_passes_visual_context_to_translation(self):
+        """Test visual context summaries are passed to translation calls."""
+        import asyncio
+        from app.services.base import TranscriptionResult, TranslationResult, TTSResult
+        from app.services.pipeline_service import TranslationPipelineService
+
+        class FakeWhisperService:
+            mock_mode = True
+
+            async def stream_transcribe(self, audio_generator, language=None):
+                async for _ in audio_generator:
+                    break
+                yield TranscriptionResult(
+                    text="Move it to stock.",
+                    language="en",
+                    success=True,
+                    is_partial=False,
+                )
+
+            async def close(self):
+                return None
+
+        class FakeTranslationService:
+            mock_mode = True
+
+            def __init__(self):
+                self.calls = []
+
+            async def translate(
+                self,
+                text,
+                source_language,
+                target_language,
+                context=None,
+                visual_context=None,
+            ):
+                self.calls.append(visual_context)
+                return TranslationResult(
+                    text="Ins Lager verschieben.",
+                    source_language=source_language,
+                    target_language=target_language,
+                    success=True,
+                )
+
+            async def close(self):
+                return None
+
+        class FakeTTSService:
+            mock_mode = True
+
+            async def synthesize(self, text, language, output_path=None):
+                return TTSResult(audio_url="/fake.wav", success=True)
+
+            async def close(self):
+                return None
+
+        async def audio_generator():
+            yield b"audio"
+
+        async def run_pipeline():
+            visual_context_queue = asyncio.Queue()
+            visual_context_queue.put_nowait("The shared tab shows Odoo Inventory.")
+            translation = FakeTranslationService()
+            pipeline = TranslationPipelineService(
+                whisper_service=FakeWhisperService(),
+                translation_service=translation,
+                tts_service=FakeTTSService(),
+                warm_connections=False,
+            )
+            async for _ in pipeline.process_streaming(
+                audio_generator(),
+                source_language="en",
+                target_language="de",
+                save_media=False,
+                visual_context_queue=visual_context_queue,
+            ):
+                pass
+            return translation.calls
+
+        translation_calls = asyncio.run(run_pipeline())
+
+        assert translation_calls == ["The shared tab shows Odoo Inventory."]
 
     def test_pipeline_extracts_simple_cumulative_delta(self):
         """Test cumulative STT growth returns only newly appended text."""
