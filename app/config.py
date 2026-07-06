@@ -13,6 +13,8 @@ from pathlib import Path
 from typing import Any
 from dotenv import load_dotenv
 
+from .ui_locales import SUPPORTED_UI_LOCALE_CODES
+
 
 class Config:
     """
@@ -163,6 +165,36 @@ class Config:
             return int(value)
         except (TypeError, ValueError):
             return 8000
+
+    @property
+    def default_ui_locale(self) -> str:
+        """Get the default UI locale."""
+        value = os.environ.get("DEFAULT_UI_LOCALE") or self.app.get(
+            "default_ui_locale", "en"
+        )
+        normalized = str(value).strip().replace("-", "_").split("_", 1)[0]
+        return normalized if normalized in SUPPORTED_UI_LOCALE_CODES else "en"
+
+    @property
+    def supported_ui_locales(self) -> list[str]:
+        """Get supported UI locales for the web interface."""
+        configured = os.environ.get("SUPPORTED_UI_LOCALES") or self.app.get(
+            "supported_ui_locales"
+        )
+        if configured:
+            if isinstance(configured, str):
+                values = [value.strip() for value in configured.split(",")]
+            else:
+                values = [str(value).strip() for value in configured]
+            locales = [
+                value.replace("-", "_").split("_", 1)[0] for value in values if value
+            ]
+            filtered = [
+                locale for locale in locales if locale in SUPPORTED_UI_LOCALE_CODES
+            ]
+            if filtered:
+                return filtered
+        return sorted(SUPPORTED_UI_LOCALE_CODES)
 
 
 def get_config() -> Config:

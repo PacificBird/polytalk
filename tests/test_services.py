@@ -956,7 +956,10 @@ class TestTranslationPipelineService:
                 metrics={},
             )
 
+        captured_translate_kwargs = {}
+
         async def mock_translate(*args, **kwargs):
+            captured_translate_kwargs.update(kwargs)
             return MagicMock(success=True, text="translated.", language="en")
 
         async def mock_synthesize(*args, **kwargs):
@@ -970,11 +973,18 @@ class TestTranslationPipelineService:
                 with patch.object(pipeline.tts, "synthesize", mock_synthesize):
                     results = []
                     async for result in pipeline.process_streaming(
-                        mock_audio_gen(), "en", "gu"
+                        mock_audio_gen(),
+                        "en",
+                        "gu",
+                        custom_instruction="Translate formally.",
                     ):
                         results.append(result)
 
                     assert len(results) > 0
+                    assert (
+                        captured_translate_kwargs["custom_instruction"]
+                        == "Translate formally."
+                    )
 
     @pytest.mark.asyncio
     async def test_process_streaming_translation_retry_on_failure(self):
@@ -2061,3 +2071,389 @@ class TestTranslationPipelineService:
                 pass
 
             assert len(results) > 0
+
+
+@pytest.mark.asyncio
+async def test_conversation_mode_uses_detected_language_for_direction():
+    """Conversation mode translates each pause-flushed turn to the opposite language."""
+    from app.services.base import TranscriptionResult, TranslationResult, TTSResult
+
+    class FakeWhisper:
+        mock_mode = True
+
+        async def close(self):
+            pass
+
+        async def stream_transcribe(
+            self,
+            audio_generator,
+            language=None,
+            emit_policy="live",
+            candidate_languages=None,
+            on_result=None,
+        ):
+            assert language is None
+            assert emit_policy == "pause"
+            assert candidate_languages == ["de", "en"]
+            yield TranscriptionResult(
+                text="Guten Morgen", language="de", is_partial=True
+            )
+            yield TranscriptionResult(text="Guten Morgen How are you", language="en")
+
+    class FakeTranslation:
+        mock_mode = True
+
+        def __init__(self):
+            self.calls = []
+
+        async def close(self):
+            pass
+
+        async def translate(self, text, source_language, target_language, **kwargs):
+            self.calls.append((text, source_language, target_language))
+            translated = (
+                "Good morning" if target_language == "en" else "Wie geht es dir?"
+            )
+            return TranslationResult(text=translated, success=True)
+
+    class FakeTTS:
+        def __init__(self):
+            self.languages = []
+
+        async def close(self):
+            pass
+
+        async def synthesize(self, text, language, output_path=None):
+            self.languages.append(language)
+            return TTSResult(audio_url=f"/media/output/{language}.wav", success=True)
+
+    async def audio_generator():
+        yield b"pcm"
+        yield b"__END_SIGNAL__"
+
+    translation = FakeTranslation()
+    tts = FakeTTS()
+    pipeline = TranslationPipelineService(
+        whisper_service=FakeWhisper(),
+        translation_service=translation,
+        tts_service=tts,
+        warm_connections=False,
+    )
+
+    results = [
+        item
+        async for item in pipeline.process_streaming(
+            audio_generator(), "de", "en", mode="conversation"
+        )
+    ]
+
+    assert [
+        item["transcript"] for item in results if item.get("type") == "transcription"
+    ] == ["Guten Morgen", "Guten Morgen How are you"]
+    assert [
+        item["is_partial"] for item in results if item.get("type") == "transcription"
+    ] == [True, False]
+    turns = [item for item in results if item.get("type") == "conversation_turn"]
+    assert [(turn["source_language"], turn["target_language"]) for turn in turns] == [
+        ("de", "en"),
+        ("en", "de"),
+    ]
+    assert [item["sequence"] for item in results if item.get("type") == "tts"] == [1, 2]
+    assert translation.calls == [
+        ("Guten Morgen", "de", "en"),
+        ("How are you", "en", "de"),
+    ]
+    assert tts.languages == ["en", "de"]
+
+
+@pytest.mark.asyncio
+async def test_conversation_mode_passes_custom_instruction():
+    """Conversation mode passes custom translation guidance to translation calls."""
+    from app.services.base import TranscriptionResult, TranslationResult, TTSResult
+
+    class FakeWhisper:
+        mock_mode = True
+
+        async def close(self):
+            pass
+
+        async def stream_transcribe(
+            self,
+            audio_generator,
+            language=None,
+            emit_policy="live",
+            candidate_languages=None,
+            on_result=None,
+        ):
+            yield TranscriptionResult(text="Guten Morgen", language="de")
+
+    class FakeTranslation:
+        mock_mode = True
+
+        def __init__(self):
+            self.calls = []
+
+        async def close(self):
+            pass
+
+        async def translate(self, text, source_language, target_language, **kwargs):
+            self.calls.append(kwargs.get("custom_instruction"))
+            return TranslationResult(text="Good morning", success=True)
+
+    class FakeTTS:
+        async def close(self):
+            pass
+
+        async def synthesize(self, text, language, output_path=None):
+            return TTSResult(audio_url=f"/media/output/{language}.wav", success=True)
+
+    async def audio_generator():
+        yield b"pcm"
+        yield b"__END_SIGNAL__"
+
+    translation = FakeTranslation()
+    pipeline = TranslationPipelineService(
+        whisper_service=FakeWhisper(),
+        translation_service=translation,
+        tts_service=FakeTTS(),
+        warm_connections=False,
+    )
+
+    results = [
+        item
+        async for item in pipeline.process_streaming(
+            audio_generator(),
+            "de",
+            "en",
+            mode="conversation",
+            custom_instruction="Translate formally.",
+        )
+    ]
+
+    assert [item for item in results if item.get("type") == "conversation_turn"]
+    assert translation.calls == ["Translate formally."]
+
+
+@pytest.mark.asyncio
+async def test_conversation_mode_applies_runtime_custom_instruction_update():
+    """Conversation mode drains runtime custom instruction updates."""
+    from app.services.base import TranscriptionResult, TranslationResult, TTSResult
+
+    class FakeWhisper:
+        mock_mode = True
+
+        async def close(self):
+            pass
+
+        async def stream_transcribe(
+            self,
+            audio_generator,
+            language=None,
+            emit_policy="live",
+            candidate_languages=None,
+            on_result=None,
+        ):
+            yield TranscriptionResult(text="Guten Morgen", language="de")
+
+    class FakeTranslation:
+        mock_mode = True
+
+        def __init__(self):
+            self.calls = []
+
+        async def close(self):
+            pass
+
+        async def translate(self, text, source_language, target_language, **kwargs):
+            self.calls.append(kwargs.get("custom_instruction"))
+            return TranslationResult(text="Good morning", success=True)
+
+    class FakeTTS:
+        async def close(self):
+            pass
+
+        async def synthesize(self, text, language, output_path=None):
+            return TTSResult(audio_url=f"/media/output/{language}.wav", success=True)
+
+    async def audio_generator():
+        yield b"pcm"
+        yield b"__END_SIGNAL__"
+
+    custom_instruction_queue = asyncio.Queue()
+    custom_instruction_queue.put_nowait(" Keep product names in English. ")
+    translation = FakeTranslation()
+    pipeline = TranslationPipelineService(
+        whisper_service=FakeWhisper(),
+        translation_service=translation,
+        tts_service=FakeTTS(),
+        warm_connections=False,
+    )
+
+    results = [
+        item
+        async for item in pipeline.process_streaming(
+            audio_generator(),
+            "de",
+            "en",
+            mode="conversation",
+            custom_instruction_queue=custom_instruction_queue,
+        )
+    ]
+
+    assert [item for item in results if item.get("type") == "conversation_turn"]
+    assert translation.calls == ["Keep product names in English."]
+
+
+@pytest.mark.asyncio
+async def test_conversation_mode_treats_urdu_detection_as_hindi_when_hindi_selected():
+    """Hindi speech may be detected as Urdu; selected Hindi should still drive direction."""
+    from app.services.base import TranscriptionResult, TranslationResult, TTSResult
+
+    class FakeWhisper:
+        mock_mode = True
+
+        async def close(self):
+            pass
+
+        async def stream_transcribe(
+            self,
+            audio_generator,
+            language=None,
+            emit_policy="live",
+            candidate_languages=None,
+            on_result=None,
+        ):
+            assert language is None
+            assert emit_policy == "pause"
+            assert candidate_languages == ["en", "hi"]
+            yield TranscriptionResult(text="मैं ठीक हूँ", language="ur")
+
+    class FakeTranslation:
+        mock_mode = True
+
+        def __init__(self):
+            self.calls = []
+
+        async def close(self):
+            pass
+
+        async def translate(self, text, source_language, target_language, **kwargs):
+            self.calls.append((text, source_language, target_language))
+            return TranslationResult(text="I am fine", success=True)
+
+    class FakeTTS:
+        def __init__(self):
+            self.languages = []
+
+        async def close(self):
+            pass
+
+        async def synthesize(self, text, language, output_path=None):
+            self.languages.append(language)
+            return TTSResult(audio_url=f"/media/output/{language}.wav", success=True)
+
+    async def audio_generator():
+        yield b"pcm"
+        yield b"__END_SIGNAL__"
+
+    translation = FakeTranslation()
+    tts = FakeTTS()
+    pipeline = TranslationPipelineService(
+        whisper_service=FakeWhisper(),
+        translation_service=translation,
+        tts_service=tts,
+        warm_connections=False,
+    )
+
+    results = [
+        item
+        async for item in pipeline.process_streaming(
+            audio_generator(), "en", "hi", mode="conversation"
+        )
+    ]
+
+    assert [
+        item["transcript"] for item in results if item.get("type") == "transcription"
+    ] == ["मैं ठीक हूँ"]
+    turns = [item for item in results if item.get("type") == "conversation_turn"]
+    assert [(turn["source_language"], turn["target_language"]) for turn in turns] == [
+        ("hi", "en"),
+    ]
+    assert [item["sequence"] for item in results if item.get("type") == "tts"] == [1]
+    assert turns[0]["detected_language"] == "ur"
+    assert translation.calls == [("मैं ठीक हूँ", "hi", "en")]
+    assert tts.languages == ["en"]
+
+
+def test_conversation_direction_uses_default_when_detected_matches_both_sides():
+    """Dialect pairs normalize to the same base code, so do not reverse direction."""
+    assert TranslationPipelineService._conversation_direction(
+        "en", "en-GB", "en-US"
+    ) == ("en-GB", "en-US")
+
+
+@pytest.mark.asyncio
+async def test_conversation_mode_keeps_two_character_turns():
+    """Short utterances like ok/hi are meaningful conversation turns."""
+    from app.services.base import TranscriptionResult, TranslationResult, TTSResult
+
+    class FakeWhisper:
+        mock_mode = True
+
+        async def close(self):
+            pass
+
+        async def stream_transcribe(
+            self,
+            audio_generator,
+            language=None,
+            emit_policy="live",
+            candidate_languages=None,
+            on_result=None,
+        ):
+            yield TranscriptionResult(text="ok", language="en")
+
+    class FakeTranslation:
+        mock_mode = True
+
+        def __init__(self):
+            self.calls = []
+
+        async def close(self):
+            pass
+
+        async def translate(self, text, source_language, target_language, **kwargs):
+            self.calls.append((text, source_language, target_language))
+            return TranslationResult(text="ठीक है", success=True)
+
+    class FakeTTS:
+        async def close(self):
+            pass
+
+        async def synthesize(self, text, language, output_path=None):
+            return TTSResult(audio_url=f"/media/output/{language}.wav", success=True)
+
+    async def audio_generator():
+        yield b"pcm"
+        yield b"__END_SIGNAL__"
+
+    translation = FakeTranslation()
+    pipeline = TranslationPipelineService(
+        whisper_service=FakeWhisper(),
+        translation_service=translation,
+        tts_service=FakeTTS(),
+        warm_connections=False,
+    )
+
+    results = [
+        item
+        async for item in pipeline.process_streaming(
+            audio_generator(), "en", "hi", mode="conversation"
+        )
+    ]
+
+    turns = [item for item in results if item.get("type") == "conversation_turn"]
+    assert [(turn["transcript"], turn["translated_text"]) for turn in turns] == [
+        ("ok", "ठीक है"),
+    ]
+    assert translation.calls == [("ok", "en", "hi")]

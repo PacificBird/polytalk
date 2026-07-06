@@ -96,6 +96,40 @@ class TestAPIRouter:
         )
         assert should_start_visual_context_request("", False, False) is False
 
+    def test_sanitize_custom_instruction_normalizes_and_bounds(self):
+        """Test custom instruction input is normalized before pipeline use."""
+        from app.routers.api import sanitize_custom_instruction
+        from app.utils.config import get_custom_instruction_max_chars
+
+        expected_max = get_custom_instruction_max_chars()
+
+        assert sanitize_custom_instruction(None) == ""
+        assert (
+            sanitize_custom_instruction("  Translate\x00   formally.\n")
+            == "Translate formally."
+        )
+        assert sanitize_custom_instruction("x" * 300) == "x" * expected_max
+
+    def test_sanitize_custom_instruction_accepts_string_max_chars(self):
+        """Env-expanded max-char config strings are parsed before slicing."""
+        from app.routers.api import sanitize_custom_instruction
+
+        with patch("app.utils.config.get_config") as mock_get_config:
+            mock_get_config.return_value.translation = {
+                "custom_instruction_max_chars": "7",
+            }
+
+            assert sanitize_custom_instruction("x" * 20) == "x" * 7
+
+    def test_normalize_instruction_edge_cases(self):
+        """Shared instruction normalizer trims, cleans, and bounds values."""
+        from app.utils.sanitize import normalize_instruction
+
+        assert normalize_instruction(None, 250) == ""
+        assert normalize_instruction("  Keep\x00  SKU-123\n ", 250) == "Keep SKU-123"
+        assert normalize_instruction("x" * 20, 7) == "x" * 7
+        assert normalize_instruction("x" * 20, None) == "x" * 20
+
 
 class TestWebSocketEndpoint:
     """Test WebSocket endpoint for real-time translation."""
@@ -132,6 +166,31 @@ class TestWebSocketEndpoint:
                     websocket.send_text('{"audio": "base64data"}')
             except Exception:
                 pass
+
+    @pytest.mark.asyncio
+    async def test_websocket_passes_custom_instruction_to_pipeline(self, client):
+        """Test custom translation guidance reaches the streaming pipeline."""
+        captured_kwargs = {}
+
+        with patch("app.routers.api.get_pipeline_service") as mock_get_pipeline:
+            mock_pipeline = MagicMock()
+            mock_pipeline.warm_connections = AsyncMock()
+            mock_get_pipeline.return_value = mock_pipeline
+
+            async def mock_process_streaming(*args, **kwargs):
+                captured_kwargs.update(kwargs)
+                yield {"type": "complete"}
+
+            mock_pipeline.process_streaming = mock_process_streaming
+
+            with client.websocket_connect(
+                "/api/ws/translate?source_language=en&target_language=gu&custom_instruction=Translate%20formally."
+            ) as websocket:
+                for _ in range(5):
+                    if websocket.receive_json().get("type") == "complete":
+                        break
+
+        assert captured_kwargs["custom_instruction"] == "Translate formally."
 
     @pytest.mark.asyncio
     async def test_websocket_disconnect_handling(self, client):

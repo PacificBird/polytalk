@@ -27,6 +27,20 @@ class AudioRecorder {
     }
 
     /**
+     * Translate source text from the locale catalog.
+     */
+    uiText(value, params = {}) {
+        return window.PolyTalkI18n?.text(value, params) || String(value ?? '');
+    }
+
+    /**
+     * Translate a UI message key.
+     */
+    t(key, params = {}) {
+        return window.PolyTalkI18n?.t(key, params) || key;
+    }
+
+    /**
      * Enumerate available audio input devices
      * @returns {Promise<Array>} - List of audio input devices
      */
@@ -107,7 +121,7 @@ class AudioRecorder {
     async requestPermission() {
         try {
             if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-                alert("getUserMedia is not supported in this browser.");
+                alert(this.uiText('getUserMedia is not supported in this browser.'));
                 return false;
             }
 
@@ -119,7 +133,7 @@ class AudioRecorder {
             return true;
         } catch (error) {
             console.error("Microphone permission denied or failed:", error);
-            alert(`Microphone access failed: ${error.name} - ${error.message}`);
+            alert(this.t('js.microphone_access_failed', { name: error.name, message: error.message }));
             return false;
         }
     }
@@ -130,6 +144,23 @@ class AudioRecorder {
      */
     setDeviceId(deviceId) {
         this.selectedDeviceId = deviceId;
+    }
+
+    /**
+     * Calculate RMS audio level from float samples.
+     * @param {Float32Array} samples - Audio samples in the -1..1 range
+     * @returns {number} - RMS audio level
+     */
+    calculateAudioLevel(samples) {
+        if (!samples || samples.length === 0) {
+            return 0;
+        }
+
+        let sumSquares = 0;
+        for (let i = 0; i < samples.length; i++) {
+            sumSquares += samples[i] * samples[i];
+        }
+        return Math.sqrt(sumSquares / samples.length);
     }
 
     /**
@@ -167,6 +198,7 @@ class AudioRecorder {
             scriptProcessor.onaudioprocess = (event) => {
                 const input = event.inputBuffer.getChannelData(0);
 
+                const level = this.calculateAudioLevel(input);
                 const int16Array = new Int16Array(input.length);
                 for (let i = 0; i < input.length; i++) {
                     const s = Math.max(-1, Math.min(1, input[i]));
@@ -176,7 +208,7 @@ class AudioRecorder {
                 const buffer = int16Array.buffer;
 
                 if (this.onChunk && buffer.byteLength > 0) {
-                    this.onChunk(buffer);
+                    this.onChunk(buffer, level);
                 }
             };
 
@@ -214,14 +246,14 @@ class AudioRecorder {
             const stream = await navigator.mediaDevices.getDisplayMedia(displayMediaOptions);
 
             if (!stream || stream.getTracks().length === 0) {
-                throw new Error('User cancelled screen sharing');
+                throw new Error(this.uiText('User cancelled screen sharing'));
             }
 
             const audioTrack = stream.getAudioTracks()[0];
 
             if (!audioTrack) {
                 stream.getTracks().forEach(track => track.stop());
-                throw new Error('No audio track found. Please select a tab with audio and enable "Share audio".');
+                throw new Error(this.uiText('No audio track found. Please select a tab with audio and enable "Share audio".'));
             }
 
             this.originalStream = stream;
@@ -237,6 +269,7 @@ class AudioRecorder {
             scriptProcessor.onaudioprocess = (event) => {
                 const input = event.inputBuffer.getChannelData(0);
 
+                const level = this.calculateAudioLevel(input);
                 const int16Array = new Int16Array(input.length);
                 for (let i = 0; i < input.length; i++) {
                     const s = Math.max(-1, Math.min(1, input[i]));
@@ -245,7 +278,7 @@ class AudioRecorder {
 
                 const buffer = int16Array.buffer;
                 if (this.onChunk && buffer.byteLength > 0) {
-                    this.onChunk(buffer);
+                    this.onChunk(buffer, level);
                 }
             };
 

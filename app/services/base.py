@@ -84,6 +84,8 @@ class BaseTranscriptionService(ABC):
         self,
         audio_generator: AsyncGenerator[bytes, None],
         language: Optional[str] = None,
+        emit_policy: str = "live",
+        candidate_languages: Optional[list[str]] = None,
         on_result: Optional[Callable[[TranscriptionResult], None]] = None,
     ) -> AsyncGenerator[TranscriptionResult, None]:
         """
@@ -92,6 +94,8 @@ class BaseTranscriptionService(ABC):
         Args:
             audio_generator: Async generator yielding 16 kHz mono int16 PCM chunks
             language: Optional source language code hint
+            emit_policy: STT emission policy, either live or pause
+            candidate_languages: Optional language candidates for detection
             on_result: Optional callback for each transcription result
 
         Yields:
@@ -115,6 +119,7 @@ class BaseTranslationService(ABC):
         target_language: str,
         context: Optional[list[dict[str, str]]] = None,
         visual_context: Optional[str] = None,
+        custom_instruction: Optional[str] = None,
     ) -> TranslationResult:
         """
         Translate text from source to target language.
@@ -127,6 +132,7 @@ class BaseTranslationService(ABC):
                 read-only context
             visual_context: Optional shared tab/page visual summary to use as
                 a read-only hint
+            custom_instruction: Optional user-provided translation guidance
 
         Returns:
             TranslationResult with translated text

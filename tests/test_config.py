@@ -63,6 +63,91 @@ class TestConfig:
         assert parse_bool_config(2, True) is True
         assert parse_bool_config("unexpected", True) is True
 
+    def test_parse_int_config_values(self):
+        """Test shared integer config parsing helper."""
+        from app.utils.config import parse_int_config
+
+        assert parse_int_config(123, 250) == 123
+        assert parse_int_config("123", 250) == 123
+        assert parse_int_config("${CUSTOM_INSTRUCTION_MAX_CHARS}", 250) == 250
+        assert parse_int_config(None, 250) == 250
+        assert parse_int_config(True, 250) == 250
+
+    def test_custom_instruction_max_chars_cache_warns_once(self, caplog):
+        """Custom instruction limit parsing is cached per raw config value."""
+        import logging
+
+        from app.utils.config import (
+            clear_custom_instruction_max_chars_cache,
+            get_custom_instruction_max_chars,
+        )
+
+        clear_custom_instruction_max_chars_cache()
+        with caplog.at_level(logging.WARNING, logger="app.utils.config"):
+            assert get_custom_instruction_max_chars("250MB") == 250
+            assert get_custom_instruction_max_chars("250MB") == 250
+
+        assert caplog.text.count("Invalid integer config") == 1
+        clear_custom_instruction_max_chars_cache()
+
+    def test_parse_int_config_warns_for_invalid_values(self, caplog):
+        """Invalid concrete integer config values emit a warning."""
+        import logging
+
+        from app.utils.config import parse_int_config
+
+        with caplog.at_level(logging.WARNING, logger="app.utils.config"):
+            assert (
+                parse_int_config(
+                    "250MB",
+                    250,
+                    name="custom_instruction_max_chars",
+                    warn_on_invalid=True,
+                )
+                == 250
+            )
+
+        assert "custom_instruction_max_chars" in caplog.text
+        assert "250MB" in caplog.text
+
+    def test_parse_int_config_does_not_warn_for_missing_values(self, caplog):
+        """Missing integer config values fall back without noisy warnings."""
+        import logging
+
+        from app.utils.config import parse_int_config
+
+        with caplog.at_level(logging.WARNING, logger="app.utils.config"):
+            assert (
+                parse_int_config(
+                    None,
+                    250,
+                    name="custom_instruction_max_chars",
+                    warn_on_invalid=True,
+                )
+                == 250
+            )
+
+        assert caplog.text == ""
+
+    def test_parse_int_config_does_not_warn_for_unresolved_placeholders(self, caplog):
+        """Unresolved ${VAR} placeholders fall back without noisy warnings."""
+        import logging
+
+        from app.utils.config import parse_int_config
+
+        with caplog.at_level(logging.WARNING, logger="app.utils.config"):
+            assert (
+                parse_int_config(
+                    "${CUSTOM_INSTRUCTION_MAX_CHARS}",
+                    250,
+                    name="custom_instruction_max_chars",
+                    warn_on_invalid=True,
+                )
+                == 250
+            )
+
+        assert caplog.text == ""
+
     def test_config_env_expansion(self):
         """Test environment variable expansion."""
         import os

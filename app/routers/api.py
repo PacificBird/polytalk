@@ -20,7 +20,9 @@ from fastapi import (
 
 from ..services.pipeline_service import TranslationPipelineService
 from ..services.visual_context_service import VisualContextService
+from ..utils.config import get_custom_instruction_max_chars
 from ..utils.logger import get_logger
+from ..utils.sanitize import normalize_instruction
 from ..version import __version__
 
 logger = get_logger(__name__)
@@ -29,6 +31,11 @@ router = APIRouter(prefix="/api", tags=["api"])
 
 pipeline_service: Optional[TranslationPipelineService] = None
 visual_context_service: Optional[VisualContextService] = None
+
+
+def sanitize_custom_instruction(value: str | None) -> str:
+    """Normalize and bound user-provided translation guidance."""
+    return normalize_instruction(value, get_custom_instruction_max_chars())
 
 
 def get_pipeline_service() -> TranslationPipelineService:
@@ -89,6 +96,8 @@ async def websocket_translate(
     websocket: WebSocket,
     source_language: str = "en",
     target_language: str = "gu",
+    mode: str = "live",
+    custom_instruction: str | None = None,
 ):
     """
     WebSocket endpoint for real-time audio translation streaming (2-thread pipeline).
@@ -97,11 +106,20 @@ async def websocket_translate(
         websocket: WebSocket connection
         source_language: Source language code
         target_language: Target language code
+        mode: Translation mode, either live or conversation.
+        custom_instruction: Optional user-provided translation guidance.
     """
     await websocket.accept()
     logger.info(
-        f"WebSocket connection established: {source_language} -> {target_language}"
+        f"WebSocket connection established: {source_language} -> {target_language} mode={mode}"
     )
+
+    if mode not in {"live", "conversation"}:
+        await websocket.send_json(
+            {"type": "error", "error": "mode must be live or conversation"}
+        )
+        await websocket.close()
+        return
 
     pipeline = get_pipeline_service()
     audio_chunks = []
@@ -109,6 +127,7 @@ async def websocket_translate(
     pause_event = asyncio.Event()
     language_swap_queue = asyncio.Queue()
     visual_context_queue = asyncio.Queue(maxsize=1)
+    custom_instruction_queue = asyncio.Queue(maxsize=1)
     visual_context_tasks: set[asyncio.Task] = set()
     visual_context_in_flight = False
     visual_context_ready = False
@@ -177,6 +196,20 @@ async def websocket_translate(
                         logger.info(
                             "Client sent 'resume' signal, resuming audio transmission"
                         )
+                    elif data.get("type") == "custom_instruction":
+                        instruction = sanitize_custom_instruction(
+                            data.get("custom_instruction")
+                        )
+                        while not custom_instruction_queue.empty():
+                            try:
+                                custom_instruction_queue.get_nowait()
+                            except asyncio.QueueEmpty:
+                                break
+                        custom_instruction_queue.put_nowait(instruction)
+                        logger.info(
+                            "Custom translation instruction updated: "
+                            f"chars={len(instruction)}"
+                        )
                     elif data.get("type") == "visual_context":
                         image_data_url = data.get("image_data_url") or ""
                         if should_start_visual_context_request(
@@ -193,32 +226,20 @@ async def websocket_translate(
                         elif image_data_url:
                             logger.debug("Ignoring duplicate visual context request")
                     elif data.get("type") == "swap_languages":
-                        new_source = data.get("source_language")
-                        new_target = data.get("target_language")
-                        if new_source and new_target and new_source != new_target:
-                            # Queue the language swap for the pipeline
-                            await language_swap_queue.put(
+                        logger.info(
+                            "Ignoring language swap request; runtime swap is disabled"
+                        )
+                        try:
+                            await websocket.send_json(
                                 {
-                                    "source_language": new_source,
-                                    "target_language": new_target,
+                                    "type": "swap_disabled",
+                                    "message": "Language swap is disabled for active sessions",
                                 }
                             )
-                            logger.info(
-                                f"Language swap queued: {new_source} -> {new_target}"
+                        except Exception as e:
+                            logger.warning(
+                                f"Failed to send swap disabled response: {e}"
                             )
-                            # Send confirmation to frontend
-                            try:
-                                await websocket.send_json(
-                                    {
-                                        "type": "language_swapped",
-                                        "source_language": new_source,
-                                        "target_language": new_target,
-                                    }
-                                )
-                            except Exception as e:
-                                logger.warning(
-                                    f"Failed to send language swap confirmation: {e}"
-                                )
         except WebSocketDisconnect:
             client_disconnected = True
             logger.info("Client disconnected")
@@ -316,9 +337,12 @@ async def websocket_translate(
             audio_gen,
             source_language,
             target_language,
+            mode=mode,
             pause_event=pause_event,
             language_swap_queue=language_swap_queue,
             visual_context_queue=visual_context_queue,
+            custom_instruction=sanitize_custom_instruction(custom_instruction),
+            custom_instruction_queue=custom_instruction_queue,
         ):
             if client_disconnected:
                 logger.info("Client disconnected, stopping pipeline")

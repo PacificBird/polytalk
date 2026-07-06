@@ -98,7 +98,8 @@
     }
 
     .btn-live,
-    .btn-share {
+    .btn-share,
+    .btn-conversation {
         width: 70px;
         min-width: 70px;
         height: 56px;
@@ -155,6 +156,7 @@
     .btn-live::after,
     .btn-share::after,
     .btn-swap::after,
+    .btn-conversation::after,
     .recording-indicator::before {
         display: none;
     }

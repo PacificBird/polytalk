@@ -19,12 +19,36 @@ translation:
   api_format: "${TRANSLATION_API_FORMAT}"
   api_key: "${TRANSLATION_API_KEY}"
   model: "${TRANSLATION_MODEL}"
+  providers:
+    qwen3:
+      base_url: "${TRANSLATION_BASE_URL}"
+      endpoint: "${TRANSLATION_ENDPOINT}"
+      api_format: "${TRANSLATION_API_FORMAT}"
+      api_key: "${TRANSLATION_API_KEY}"
+      model: "${TRANSLATION_MODEL}"
+    translategamma:
+      base_url: "${TRANSLATEGAMMA_BASE_URL}"
+      endpoint: "${TRANSLATEGAMMA_ENDPOINT}"
+      api_format: "${TRANSLATEGAMMA_API_FORMAT}"
+      api_key: "${TRANSLATEGAMMA_API_KEY}"
+      model: "${TRANSLATEGAMMA_MODEL}"
+  # Enable these when you want priority-based language routing. Without
+  # routing, the flat translation settings above remain the active default.
+  # default_provider: qwen3
+  # routing:
+  #   - priority: 10
+  #     target_langs: [gu, hi, mr]
+  #     provider: translategamma
+  #   - priority: 20
+  #     source_langs: [en]
+  #     provider: qwen3
   temperature: 0.0
   max_tokens: "${TRANSLATION_MAX_TOKENS}"
   context_enabled: true
   context_max_chunks: 4
   context_max_chars: 1200
   context_payload_warn_chars: 2000
+  custom_instruction_max_chars: "${CUSTOM_INSTRUCTION_MAX_CHARS}"
   system_prompt: "You are a professional translator. Translate from {source_language} to {target_language}. Write natural, fluent {target_language}. Preserve the meaning only; do not add explanations, summaries, repeated text, or source-language commentary. If the source transcript is fragmented, translate the intended meaning as faithfully as possible. Return ONLY the translation."
 
 visual_context:
@@ -58,30 +82,46 @@ tts:
         ja: "${SUPERTONIC_TTS_JA_VOICE}"
         ko: "${SUPERTONIC_TTS_KO_VOICE}"
   language_providers:
+    ar: "supertonic"
+    bg: "supertonic"
+    hr: "supertonic"
+    et: "supertonic"
+    hi: "supertonic"
+    ru: "supertonic"
+    id: "supertonic"
+    vi: "supertonic"
+    pt: "supertonic"
+    pl: "supertonic"
+    uk: "supertonic"
+    sv: "supertonic"
+    da: "supertonic"
+    fi: "supertonic"
+    cs: "supertonic"
+    el: "supertonic"
+    hu: "supertonic"
+    lv: "supertonic"
+    lt: "supertonic"
+    sk: "supertonic"
+    sl: "supertonic"
     ja: "supertonic"
-    ja_JP: "supertonic"
     ko: "supertonic"
-    ko_KR: "supertonic"
   voice: "en_GB-jenny_dioco-medium"
   timeout_seconds: 10
   length_scales:
     default: 0.9
     gu: 0.75
   default_voices:
-    ar: "ar_JO-kareem-medium"
     en: "en_GB-jenny_dioco-medium"
     de: "de_DE-karlsson-low"
     es: "es_ES-davefx-medium"
     es_MX: "es_MX-claude-high"
     fr: "fr_FR-siwis-medium"
     gu: "gu_IN-aikosh_female-medium"
-    hi: "hi_IN-priyamvada-medium"
     it: "it_IT-paola-medium"
     ml: "ml_IN-arjun-medium"
     nl: "nl_NL-ronnie-medium"
     nl_BE: "nl_BE-nathalie-medium"
     ro: "ro_RO-mihai-medium"
-    ru: "ru_RU-denis-medium"
     tr: "tr_TR-dfki-medium"
     zh: "zh_CN-huayan-medium"
 

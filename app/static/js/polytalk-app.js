@@ -44,6 +44,27 @@ class PolyTalkApp {
     supportedLanguages = null;
 
     /**
+     * Translate a UI message key.
+     */
+    t(key, params = {}) {
+        return window.PolyTalkI18n?.t(key, params) || key;
+    }
+
+    /**
+     * Translate source text from the locale catalog.
+     */
+    uiText(value, params = {}) {
+        return window.PolyTalkI18n?.text(value, params) || String(value ?? '');
+    }
+
+    /**
+     * Return localized control button markup while preserving icon spans.
+     */
+    controlButtonHtml(iconClass, label) {
+        return `<span class="control-icon ${iconClass}" aria-hidden="true"></span><span class="btn-text">${this.escapeHtml(label)}</span>`;
+    }
+
+    /**
      * Initialize async operations
      */
     async initAsync() {
@@ -57,6 +78,7 @@ class PolyTalkApp {
      */
     initElements() {
         this.liveBtn = document.getElementById('live-btn');
+        this.conversationBtn = document.getElementById('conversation-btn');
         this.shareTabBtn = document.getElementById('share-tab-btn');
         this.recordingControls = document.getElementById('recording-controls');
         this.pauseBtn = document.getElementById('pause-btn');
@@ -71,6 +93,8 @@ class PolyTalkApp {
         this.settingsModal = document.getElementById('settings-modal');
         this.inputDeviceSelect = document.getElementById('input-device-select');
         this.outputDeviceSelect = document.getElementById('output-device-select');
+        this.customInstructionInput = document.getElementById('custom-instruction-input');
+        this.customInstructionCount = document.getElementById('custom-instruction-count');
         this.status = document.getElementById('status');
         this.recordingIndicator = document.getElementById('recording-indicator');
         this.transcript = document.getElementById('transcript');
@@ -85,9 +109,15 @@ class PolyTalkApp {
 
         // Enable buttons on init
         if (this.liveBtn) this.liveBtn.disabled = false;
+        if (this.conversationBtn) this.conversationBtn.disabled = false;
         if (this.shareTabBtn) this.shareTabBtn.disabled = false;
         if (this.pauseBtn) this.pauseBtn.disabled = true;
         if (this.stopBtn) this.stopBtn.disabled = true;
+        if (this.swapLangsBtn) {
+            this.swapLangsBtn.disabled = false;
+            this.swapLangsBtn.setAttribute('aria-disabled', 'false');
+            this.swapLangsBtn.title = this.uiText('Swap Languages');
+        }
         if (this.sessionControls) this.sessionControls.style.display = 'none';
     }
 
@@ -97,7 +127,11 @@ class PolyTalkApp {
     initEventListeners() {
         this.liveBtn = document.getElementById('live-btn');
         if (this.liveBtn) {
-            this.liveBtn.addEventListener('click', () => this.startLiveTranslation());
+            this.liveBtn.addEventListener('click', () => this.startLiveTranslation('live'));
+        }
+        this.conversationBtn = document.getElementById('conversation-btn');
+        if (this.conversationBtn) {
+            this.conversationBtn.addEventListener('click', () => this.startLiveTranslation('conversation'));
         }
         this.shareTabBtn = document.getElementById('share-tab-btn');
         if (this.shareTabBtn) {
@@ -113,6 +147,8 @@ class PolyTalkApp {
         }
         this.swapLangsBtn = document.getElementById('swap-langs-btn');
         if (this.swapLangsBtn) {
+            this.swapLangsBtn.disabled = false;
+            this.swapLangsBtn.setAttribute('aria-disabled', 'false');
             this.swapLangsBtn.addEventListener('click', () => this.handleSwapLanguages());
         }
         if (this.sourceLang) {
@@ -156,6 +192,15 @@ class PolyTalkApp {
         this.outputDeviceSelect = document.getElementById('output-device-select');
         if (this.outputDeviceSelect) {
             this.outputDeviceSelect.addEventListener('change', (e) => this.handleOutputDeviceChange(e));
+        }
+        if (this.customInstructionInput) {
+            this.customInstructionInput.addEventListener('input', () => this.updateCustomInstructionCount());
+            this.customInstructionInput.addEventListener('paste', () => {
+                window.setTimeout(() => this.enforceCustomInstructionMaxLength(), 0);
+            });
+            this.customInstructionInput.addEventListener('drop', () => {
+                window.setTimeout(() => this.enforceCustomInstructionMaxLength(), 0);
+            });
         }
         const saveSettingsBtn = document.getElementById('save-settings-btn');
         if (saveSettingsBtn) {
@@ -300,7 +345,7 @@ class PolyTalkApp {
     handleMicrophoneChange(event) {
         const deviceId = event.target.value;
         this.audioRecorder.setDeviceId(deviceId);
-        this.showStatus(`Microphone changed to: ${event.target.options[event.target.selectedIndex].text}`, 'info');
+        this.showStatus(this.t('js.microphone_changed', { device: event.target.options[event.target.selectedIndex].text }), 'info');
         if (this.inputDeviceSelect) {
             this.inputDeviceSelect.value = deviceId;
         }
@@ -313,7 +358,7 @@ class PolyTalkApp {
     handleInputDeviceChange(event) {
         const deviceId = event.target.value;
         this.audioRecorder.setDeviceId(deviceId);
-        this.showStatus(`Microphone changed to: ${event.target.options[event.target.selectedIndex].text}`, 'info');
+        this.showStatus(this.t('js.microphone_changed', { device: event.target.options[event.target.selectedIndex].text }), 'info');
         if (this.microphoneSelect) {
             this.microphoneSelect.value = deviceId;
         }
@@ -327,7 +372,7 @@ class PolyTalkApp {
         const deviceId = event.target.value;
         this.audioRecorder.setOutputDeviceId(deviceId);
         this.applyOutputDeviceToAudioPlayer(deviceId);
-        this.showStatus(`Output device changed to: ${event.target.options[event.target.selectedIndex].text}`, 'info');
+        this.showStatus(this.t('js.output_device_changed', { device: event.target.options[event.target.selectedIndex].text }), 'info');
     }
 
     /**
@@ -361,7 +406,7 @@ class PolyTalkApp {
             // Request microphone permission first to ensure all devices are visible
             const hasPermission = await this.audioRecorder.requestPermission();
             if (!hasPermission) {
-                alert('Microphone permission is required to view available devices.');
+                alert(this.uiText('Microphone permission is required to view available devices.'));
                 return;
             }
 
@@ -388,9 +433,15 @@ class PolyTalkApp {
     saveSettings() {
         const inputDeviceId = this.inputDeviceSelect?.value || 'default';
         const outputDeviceId = this.outputDeviceSelect?.value || 'default';
+        const customInstruction = this.getCustomInstruction();
+        if (this.customInstructionInput) {
+            this.customInstructionInput.value = customInstruction;
+            this.updateCustomInstructionCount();
+        }
 
         localStorage.setItem('polytalk_input_device', inputDeviceId);
         localStorage.setItem('polytalk_output_device', outputDeviceId);
+        localStorage.setItem('polytalk_custom_instruction', customInstruction);
 
         this.audioRecorder.selectedDeviceId = inputDeviceId;
         this.audioRecorder.setOutputDeviceId(outputDeviceId);
@@ -401,7 +452,7 @@ class PolyTalkApp {
 
         this.applyOutputDeviceToAudioPlayer(outputDeviceId);
 
-        this.showStatus('Settings saved successfully!', 'success');
+        this.showStatus(this.uiText('Settings saved successfully!'), 'success');
         this.closeSettings();
     }
 
@@ -411,6 +462,7 @@ class PolyTalkApp {
     loadSavedDevicePreferences() {
         const savedInputDevice = localStorage.getItem('polytalk_input_device');
         const savedOutputDevice = localStorage.getItem('polytalk_output_device');
+        this.loadSavedCustomInstruction();
 
         if (savedInputDevice) {
             this.audioRecorder.selectedDeviceId = savedInputDevice;
@@ -420,6 +472,107 @@ class PolyTalkApp {
             this.audioRecorder.selectedOutputDeviceId = savedOutputDevice;
             this.applyOutputDeviceToAudioPlayer(savedOutputDevice);
         }
+    }
+
+    /**
+     * Load saved custom translation instruction into settings.
+     */
+    loadSavedCustomInstruction() {
+        if (!this.customInstructionInput) return;
+
+        this.customInstructionInput.value = localStorage.getItem('polytalk_custom_instruction') || '';
+        this.enforceCustomInstructionMaxLength();
+    }
+
+    /**
+     * Return normalized custom instruction text bounded by the textarea limit.
+     * @returns {string} - Saved custom instruction
+     */
+    getCustomInstruction() {
+        if (!this.customInstructionInput) return '';
+
+        return this.normalizeCustomInstruction(
+            this.customInstructionInput.value,
+            this.getCustomInstructionMaxLength()
+        );
+    }
+
+    /**
+     * Normalize custom instruction text and optionally bound its length.
+     * @param {string} value - Raw instruction text
+     * @param {number|null} maxLength - Maximum character length
+     * @returns {string} - Normalized instruction text
+     */
+    normalizeCustomInstruction(value, maxLength = null) {
+        // Keep this logic aligned with app/utils/sanitize.py normalize_instruction().
+        const instruction = String(value || '')
+            .replace(/[\x00-\x1f\x7f]/g, ' ')
+            .replace(/\s+/g, ' ')
+            .trim();
+
+        return maxLength ? instruction.slice(0, maxLength) : instruction;
+    }
+
+    /**
+     * Enforce configured custom instruction length after non-typing edits.
+     */
+    enforceCustomInstructionMaxLength() {
+        if (!this.customInstructionInput) return;
+
+        const maxLength = this.getCustomInstructionMaxLength();
+        if (maxLength && this.customInstructionInput.value.length > maxLength) {
+            this.customInstructionInput.value = this.customInstructionInput.value.slice(0, maxLength);
+        }
+        this.updateCustomInstructionCount();
+    }
+
+    /**
+     * Return the configured custom instruction length from the rendered textarea.
+     * @returns {number|null} - Maximum length, or null when not configured
+     */
+    getCustomInstructionMaxLength() {
+        if (!this.customInstructionInput) return null;
+
+        const maxLength = Number.parseInt(
+            this.customInstructionInput.getAttribute('maxlength'),
+            10
+        );
+        return Number.isFinite(maxLength) && maxLength > 0 ? maxLength : null;
+    }
+
+    /**
+     * Update custom instruction character count in settings.
+     */
+    updateCustomInstructionCount() {
+        if (!this.customInstructionInput || !this.customInstructionCount) return;
+
+        const maxLength = this.getCustomInstructionMaxLength();
+        const currentLength = this.customInstructionInput.value.length;
+        this.customInstructionCount.textContent = maxLength
+            ? `${currentLength}/${maxLength}`
+            : `${currentLength}`;
+    }
+
+    /**
+     * Build a translation WebSocket URL with optional custom instruction.
+     * @param {string} sourceLang - Source language code
+     * @param {string} targetLang - Target language code
+     * @param {string} mode - Translation mode
+     * @returns {string} - WebSocket URL
+     */
+    buildTranslationWebSocketUrl(sourceLang, targetLang, mode) {
+        const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+        const params = new URLSearchParams({
+            source_language: sourceLang,
+            target_language: targetLang,
+            mode
+        });
+        const customInstruction = this.getCustomInstruction();
+        if (customInstruction) {
+            params.set('custom_instruction', customInstruction);
+        }
+
+        return `${protocol}//${window.location.host}/api/ws/translate?${params.toString()}`;
     }
 
     /**
@@ -439,7 +592,7 @@ class PolyTalkApp {
         devices.forEach((device, index) => {
             const option = document.createElement('option');
             option.value = device.deviceId;
-            option.textContent = device.label || `Microphone ${index + 1}`;
+            option.textContent = device.label || this.t('js.microphone_number', { number: index + 1 });
             this.inputDeviceSelect.appendChild(option);
         });
 
@@ -470,7 +623,7 @@ class PolyTalkApp {
         devices.forEach((device, index) => {
             const option = document.createElement('option');
             option.value = device.deviceId;
-            option.textContent = device.label || `Speaker ${index + 1}`;
+            option.textContent = device.label || this.t('js.speaker_number', { number: index + 1 });
             this.outputDeviceSelect.appendChild(option);
         });
 
@@ -489,43 +642,24 @@ class PolyTalkApp {
      * Handle swap languages button click
      */
     async handleSwapLanguages() {
+        if (this.isStreaming || this.ws?.readyState === WebSocket.OPEN) {
+            this.showStatus(this.uiText('Swap is disabled during active sessions.'), 'warning');
+            return;
+        }
         const {
             sourceLanguage: sourceValue,
             targetLanguage: targetValue
         } = this.getCurrentLanguagePair();
 
-        // Prevent swap if same language
         if (sourceValue === targetValue) {
-            this.showStatus('Source and target languages must be different.', 'warning');
+            this.showStatus(this.uiText('Source and target languages must be different.'), 'warning');
             return;
         }
 
-        // Swap the values
         this.sourceLang.value = targetValue;
         this.targetLang.value = sourceValue;
         this.updateLanguageParamsInUrl();
-
-        // If streaming, send swap message to backend via WebSocket
-        if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-            try {
-                this.ws.send(JSON.stringify({
-                    type: 'swap_languages',
-                    source_language: targetValue,
-                    target_language: sourceValue
-                }));
-                this.showStatus('Language swap requested...', 'info');
-            } catch (err) {
-                console.error('Failed to send swap message:', err);
-                this.showStatus('Failed to swap languages.', 'error');
-                // Revert dropdown values
-                this.sourceLang.value = sourceValue;
-                this.targetLang.value = targetValue;
-                this.updateLanguageParamsInUrl();
-            }
-        } else {
-            // Not streaming, just show success
-            this.showStatus('Languages swapped!', 'info');
-        }
+        this.showStatus(this.uiText('Languages swapped!'), 'info');
     }
 
     /**
@@ -548,11 +682,11 @@ class PolyTalkApp {
         const disabled = this.isMobileDevice || !this.isTabAudioSupported;
         this.shareTabBtn.disabled = disabled;
         if (this.isMobileDevice) {
-            this.shareTabBtn.title = 'Not supported on mobile yet';
+            this.shareTabBtn.title = this.uiText('Not supported on mobile yet');
         } else if (!this.isTabAudioSupported) {
-            this.shareTabBtn.title = 'Tab audio sharing is not supported in this browser';
+            this.shareTabBtn.title = this.uiText('Tab audio sharing is not supported in this browser');
         } else {
-            this.shareTabBtn.title = 'Share Tab Audio';
+            this.shareTabBtn.title = this.uiText('Share Tab Audio');
         }
     }
 
@@ -564,14 +698,14 @@ class PolyTalkApp {
 
         if (!AudioRecorder.isSupported()) {
             this.showStatus(
-                'Your browser does not support audio recording. Please use a modern browser like Chrome, Firefox, or Edge.',
+                this.uiText('Your browser does not support audio recording. Please use a modern browser like Chrome, Firefox, or Edge.'),
                 'error'
             );
             if (this.liveBtn) this.liveBtn.disabled = true;
         }
         if (!this.isTabAudioSupported) {
             this.showStatus(
-                'Your browser does not support tab audio sharing.',
+                this.uiText('Your browser does not support tab audio sharing.'),
                 'warning'
             );
         }
@@ -582,18 +716,18 @@ class PolyTalkApp {
         if (permission.state === 'granted') {
             // Permission already granted, load microphones
             await this.loadMicrophones();
-            this.showStatus('Ready to use microphone for live translation', 'success');
+            this.showStatus(this.uiText('Ready to use microphone for live translation'), 'success');
         } else if (permission.state === 'denied') {
             // Permission denied
             this.showStatus(
-                'Microphone permission denied. Click the lock icon in your browser address bar and allow microphone access to use live translation.',
+                this.uiText('Microphone permission denied. Click the lock icon in your browser address bar and allow microphone access to use live translation.'),
                 'error'
             );
             if (this.liveBtn) this.liveBtn.disabled = true;
         } else {
             // Need to request permission
             this.showStatus(
-                'Requesting microphone access...',
+                this.uiText('Requesting microphone access...'),
                 'info'
             );
 
@@ -601,11 +735,11 @@ class PolyTalkApp {
             const hasPermission = await this.audioRecorder.requestPermission();
             if (hasPermission) {
                 await this.loadMicrophones();
-                this.showStatus('Microphone access granted! Ready for live translation.', 'success');
+                this.showStatus(this.uiText('Microphone access granted! Ready for live translation.'), 'success');
                 if (this.liveBtn) this.liveBtn.disabled = false;
             } else {
                 this.showStatus(
-                    'Microphone access needed. Click "Live Translate" and allow microphone permission when prompted.',
+                    this.uiText('Microphone access needed. Click "Live Translate" and allow microphone permission when prompted.'),
                     'info'
                 );
                 if (this.liveBtn) this.liveBtn.disabled = false;
@@ -625,12 +759,16 @@ class PolyTalkApp {
         if (!this.microphoneSelect) return;
 
         const devices = await this.audioRecorder.enumerateDevices();
-        this.microphoneSelect.innerHTML = '<option value="">Select Microphone</option>';
+        this.microphoneSelect.innerHTML = '';
+        const defaultOption = document.createElement('option');
+        defaultOption.value = '';
+        defaultOption.textContent = this.uiText('Select Microphone');
+        this.microphoneSelect.appendChild(defaultOption);
 
         devices.forEach((device, index) => {
             const option = document.createElement('option');
             option.value = device.deviceId;
-            option.textContent = device.label || `Microphone ${index + 1}`;
+            option.textContent = device.label || this.t('js.microphone_number', { number: index + 1 });
             this.microphoneSelect.appendChild(option);
         });
     }
@@ -639,7 +777,7 @@ class PolyTalkApp {
      * Reset the visible session readiness panel.
      * @param {string} summary - Short readiness summary
      */
-    resetReadinessPanel(summary = 'Preparing session') {
+    resetReadinessPanel(summary = this.uiText('Preparing session')) {
         this.readinessStages = {};
         this.preserveReadinessNotice = false;
         this.flashReadiness(summary, 'active', false);
@@ -685,7 +823,7 @@ class PolyTalkApp {
             this.readinessPanel.classList.remove('active', 'done', 'warning', 'error');
         }
         if (this.readinessSummary) {
-            this.readinessSummary.textContent = 'Ready';
+            this.readinessSummary.textContent = this.uiText('Ready');
         }
     }
 
@@ -717,7 +855,7 @@ class PolyTalkApp {
         }
 
         this.readinessStages.listening = 'done';
-        this.flashReadiness('Ready. Listening now.', 'done', true);
+        this.flashReadiness(this.uiText('Ready. Listening now.'), 'done', true);
         this.isStreaming = true;
         this.isPaused = false;
         this.updateUIState('streaming');
@@ -751,7 +889,7 @@ class PolyTalkApp {
     handlePipelineStatus(result) {
         const stage = result.stage;
         const status = result.status || 'active';
-        const message = result.message || 'Preparing session';
+        const message = result.message ? this.uiText(result.message) : this.uiText('Preparing session');
 
         if (stage === 'pipeline_warming') {
             this.updateReadinessStage('pipeline_ready', 'active', message);
@@ -769,31 +907,30 @@ class PolyTalkApp {
     /**
      * Start live translation with microphone
      */
-    async startLiveTranslation() {
+    async startLiveTranslation(translationMode = 'live') {
         const {
             sourceLanguage: sourceLang,
             targetLanguage: targetLang
         } = this.getCurrentLanguagePair();
 
         if (sourceLang === targetLang) {
-            this.showStatus('Source and target languages must be different.', 'warning');
+            this.showStatus(this.uiText('Source and target languages must be different.'), 'warning');
             return;
         }
 
         this.sessionStartMode = 'microphone';
-        this.resetReadinessPanel('Requesting microphone access');
-        this.updateReadinessStage('audio_permission', 'active', 'Requesting microphone access');
+        this.resetReadinessPanel(this.uiText('Requesting microphone access'));
+        this.updateReadinessStage('audio_permission', 'active', this.uiText('Requesting microphone access'));
         this.updateUIState('connecting');
         this.clearLiveResults();
 
-        const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-        const wsUrl = `${protocol}//${window.location.host}/api/ws/translate?source_language=${sourceLang}&target_language=${targetLang}`;
+        const wsUrl = this.buildTranslationWebSocketUrl(sourceLang, targetLang, translationMode);
 
-        this.updateReadinessStage('server_connected', 'active', 'Connecting to server');
+        this.updateReadinessStage('server_connected', 'active', this.uiText('Connecting to server'));
         this.ws = new WebSocket(wsUrl);
 
         this.ws.onopen = () => {
-            this.updateReadinessStage('server_connected', 'done', 'Server connected');
+            this.updateReadinessStage('server_connected', 'done', this.uiText('Server connected'));
         };
 
         this.ws.onmessage = (event) => {
@@ -802,7 +939,7 @@ class PolyTalkApp {
         };
 
         this.ws.onerror = (error) => {
-            this.showSessionNotice('Connection issue detected. Please try again.', 'error');
+            this.showSessionNotice(this.uiText('Connection issue detected. Please try again.'), 'error');
             this.closeWebSocket();
         };
 
@@ -812,31 +949,38 @@ class PolyTalkApp {
             this.updateUIState('ready');
         };
 
-        const success = await this.audioRecorder.startMicrophone((chunk) => {
+        const suppressSilentChunks = translationMode === 'conversation';
+        const success = await this.audioRecorder.startMicrophone((chunk, level = 0) => {
+            if (suppressSilentChunks && level <= 0.002) {
+                return;
+            }
             if (this.ws && this.ws.readyState === WebSocket.OPEN && !this.isPaused) {
                 this.ws.send(chunk);
             }
         });
 
         if (!success) {
-            this.showSessionNotice('Failed to start microphone. Please check permissions.', 'error');
-            this.updateReadinessStage('audio_permission', 'error', 'Microphone unavailable');
+            this.showSessionNotice(this.uiText('Failed to start microphone. Please check permissions.'), 'error');
+            this.updateReadinessStage('audio_permission', 'error', this.uiText('Microphone unavailable'));
             this.closeWebSocket();
             this.updateUIState('ready');
             return;
         }
 
-        this.updateReadinessStage('audio_permission', 'done', 'Microphone ready');
-        this.updateReadinessStage('audio_capture', 'done', 'Audio capture ready');
+        this.updateReadinessStage('audio_permission', 'done', this.uiText('Microphone ready'));
+        this.updateReadinessStage('audio_capture', 'done', this.uiText('Audio capture ready'));
     }
 
     /**
      * Handle streaming result from WebSocket
      */
     handleStreamResult(result) {
-        // Handle language swap confirmation first (not part of switch)
-        if (result.type === 'language_swapped') {
-            this.handleLanguageSwap(result);
+        if (result.type === 'swap_disabled') {
+            this.showStatus(result.message ? this.uiText(result.message) : this.uiText('Swap is disabled in live and conversation modes.'), 'warning');
+            return;
+        }
+        if (result.type === 'conversation_turn') {
+            this.handleConversationTurn(result);
             return;
         }
         if (result.type === 'pipeline_status') {
@@ -873,7 +1017,7 @@ class PolyTalkApp {
                 break;
 
             case 'complete':
-                this.showSessionNotice('Live translation complete!', 'success');
+                this.showSessionNotice(this.uiText('Live translation complete!'), 'success');
                 if (result.transcript) {
                     this.transcript.innerHTML = this.escapeHtml(result.transcript);
                 }
@@ -886,7 +1030,7 @@ class PolyTalkApp {
                 break;
 
             case 'error':
-                this.showSessionNotice(`Error: ${result.error}`, 'error');
+                this.showSessionNotice(this.t('js.error_message', { error: result.error }), 'error');
                 this.closeWebSocket();
                 break;
         }
@@ -977,6 +1121,28 @@ class PolyTalkApp {
             this.audioPlayer.pause();
             this.audioPlayer.removeAttribute('src');
             this.audioPlayer.load();
+        }
+    }
+
+    handleConversationTurn(result) {
+        const source = this.getLanguageName(result.source_language);
+        const target = this.getLanguageName(result.target_language);
+        const direction = `${source} -> ${target}`;
+        const transcript = this.escapeHtml(result.transcript || '');
+        const translation = this.escapeHtml(result.translated_text || '');
+        if (this.liveTranscript) {
+            this.liveTranscript.querySelector('.placeholder')?.remove();
+            this.liveTranscript.insertAdjacentHTML(
+                'beforeend',
+                `<div class="conversation-turn"><strong>${this.escapeHtml(direction)}</strong><p>${transcript}</p></div>`
+            );
+        }
+        if (this.liveTranslation) {
+            this.liveTranslation.querySelector('.placeholder')?.remove();
+            this.liveTranslation.insertAdjacentHTML(
+                'beforeend',
+                `<div class="conversation-turn"><strong>${this.escapeHtml(direction)}</strong><p>${translation}</p></div>`
+            );
         }
     }
 
@@ -1095,13 +1261,13 @@ class PolyTalkApp {
         } = this.getCurrentLanguagePair();
 
         if (sourceLang === targetLang) {
-            this.showStatus('Source and target languages must be different.', 'warning');
+            this.showStatus(this.uiText('Source and target languages must be different.'), 'warning');
             return;
         }
 
         if (!navigator.mediaDevices || !navigator.mediaDevices.getDisplayMedia) {
             this.showStatus(
-                'Tab audio sharing is not supported on mobile devices. Please use "Live Translate (Microphone)" instead, or switch to a desktop browser.',
+                this.uiText('Tab audio sharing is not supported on mobile devices. Please use "Live Translate (Microphone)" instead, or switch to a desktop browser.'),
                 'error'
             );
             this.updateUIState('ready');
@@ -1109,8 +1275,8 @@ class PolyTalkApp {
         }
 
         this.sessionStartMode = 'tab';
-        this.resetReadinessPanel('Opening screen sharing dialog');
-        this.updateReadinessStage('audio_permission', 'active', 'Opening screen sharing dialog');
+        this.resetReadinessPanel(this.uiText('Opening screen sharing dialog'));
+        this.updateReadinessStage('audio_permission', 'active', this.uiText('Opening screen sharing dialog'));
         this.updateUIState('connecting');
         this.clearLiveResults();
         this.visualContextSent = false;
@@ -1124,27 +1290,26 @@ class PolyTalkApp {
             });
 
             if (!success) {
-                throw new Error('Failed to start tab audio capture');
+                throw new Error(this.uiText('Failed to start tab audio capture'));
             }
         } catch (error) {
-            this.showSessionNotice(`Failed to share tab audio: ${error.message}`, 'error');
-            this.updateReadinessStage('audio_permission', 'error', 'Tab audio unavailable');
+            this.showSessionNotice(this.t('js.failed_share_tab_audio', { error: error.message }), 'error');
+            this.updateReadinessStage('audio_permission', 'error', this.uiText('Tab audio unavailable'));
             this.updateUIState('ready');
             this.audioRecorder.stop();
             return;
         }
 
-        this.updateReadinessStage('audio_permission', 'done', 'Tab audio selected');
-        this.updateReadinessStage('audio_capture', 'done', 'Tab audio captured');
+        this.updateReadinessStage('audio_permission', 'done', this.uiText('Tab audio selected'));
+        this.updateReadinessStage('audio_capture', 'done', this.uiText('Tab audio captured'));
 
-        const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-        const wsUrl = `${protocol}//${window.location.host}/api/ws/translate?source_language=${sourceLang}&target_language=${targetLang}`;
+        const wsUrl = this.buildTranslationWebSocketUrl(sourceLang, targetLang, 'live');
 
-        this.updateReadinessStage('server_connected', 'active', 'Connecting to server');
+        this.updateReadinessStage('server_connected', 'active', this.uiText('Connecting to server'));
         this.ws = new WebSocket(wsUrl);
 
         this.ws.onopen = () => {
-            this.updateReadinessStage('server_connected', 'done', 'Server connected');
+            this.updateReadinessStage('server_connected', 'done', this.uiText('Server connected'));
             this.sendInitialVisualContext();
         };
 
@@ -1154,7 +1319,7 @@ class PolyTalkApp {
         };
 
         this.ws.onerror = (error) => {
-            this.showSessionNotice('Connection issue detected. Please try again.', 'error');
+            this.showSessionNotice(this.uiText('Connection issue detected. Please try again.'), 'error');
             this.closeWebSocket();
         };
 
@@ -1177,10 +1342,10 @@ class PolyTalkApp {
         }
 
         this.visualContextSent = true;
-        this.updateReadinessStage('visual_context', 'active', 'Capturing shared tab context');
+        this.updateReadinessStage('visual_context', 'active', this.uiText('Capturing shared tab context'));
         const screenshot = await this.audioRecorder.captureSharedTabScreenshot();
         if (!screenshot?.imageDataUrl) {
-            this.updateReadinessStage('visual_context', 'warning', 'Shared tab context unavailable');
+            this.updateReadinessStage('visual_context', 'warning', this.uiText('Shared tab context unavailable'));
             return;
         }
 
@@ -1193,7 +1358,7 @@ class PolyTalkApp {
             }));
         } catch (error) {
             console.warn('Failed to send visual context screenshot:', error);
-            this.updateReadinessStage('visual_context', 'warning', 'Shared tab context unavailable');
+            this.updateReadinessStage('visual_context', 'warning', this.uiText('Shared tab context unavailable'));
         }
     }
 
@@ -1212,19 +1377,19 @@ class PolyTalkApp {
         }
 
         if (this.isPaused) {
-            this.showSessionNotice('Paused. Audio transmission stopped.', 'info');
+            this.showSessionNotice(this.uiText('Paused. Audio transmission stopped.'), 'info');
             if (this.pauseBtn) {
-                this.pauseBtn.innerHTML = '<span class="control-icon control-icon-play" aria-hidden="true"></span><span class="btn-text">Resume</span>';
+                this.pauseBtn.innerHTML = this.controlButtonHtml('control-icon-play', this.uiText('Resume'));
                 this.pauseBtn.className = 'btn btn-resume';
-                this.pauseBtn.setAttribute('aria-label', 'Resume live translation');
+                this.pauseBtn.setAttribute('aria-label', this.uiText('Resume live translation'));
             }
             this.updateUIState('paused');
         } else {
-            this.showSessionNotice('Resumed. Audio transmission continues.', 'success');
+            this.showSessionNotice(this.uiText('Resumed. Audio transmission continues.'), 'success');
             if (this.pauseBtn) {
-                this.pauseBtn.innerHTML = '<span class="control-icon control-icon-pause" aria-hidden="true"></span><span class="btn-text">Pause</span>';
+                this.pauseBtn.innerHTML = this.controlButtonHtml('control-icon-pause', this.uiText('Pause'));
                 this.pauseBtn.className = 'btn btn-tertiary';
-                this.pauseBtn.setAttribute('aria-label', 'Pause live translation');
+                this.pauseBtn.setAttribute('aria-label', this.uiText('Pause live translation'));
             }
             this.updateUIState('streaming');
         }
@@ -1240,12 +1405,12 @@ class PolyTalkApp {
         await this.audioRecorder.stop();
         this.isPaused = false;
         if (this.pauseBtn) {
-            this.pauseBtn.innerHTML = '<span class="control-icon control-icon-pause" aria-hidden="true"></span><span class="btn-text">Pause</span>';
+            this.pauseBtn.innerHTML = this.controlButtonHtml('control-icon-pause', this.uiText('Pause'));
             this.pauseBtn.className = 'btn btn-tertiary';
-            this.pauseBtn.setAttribute('aria-label', 'Pause live translation');
+            this.pauseBtn.setAttribute('aria-label', this.uiText('Pause live translation'));
         }
         this.updateUIState('ready');
-        this.showSessionNotice('Live translation stopped.', 'success');
+        this.showSessionNotice(this.uiText('Live translation stopped.'), 'success');
     }
 
     /**
@@ -1256,7 +1421,7 @@ class PolyTalkApp {
             this.closeWebSocket();
         }
         this.updateUIState('ready');
-        this.showSessionNotice('Tab sharing stopped.', 'success');
+        this.showSessionNotice(this.uiText('Tab sharing stopped.'), 'success');
     }
 
     /**
@@ -1264,12 +1429,6 @@ class PolyTalkApp {
      * @param {Object} result - API response result
      */
     displayResult(result) {
-        // Handle language swap confirmation
-        if (result.type === 'language_swapped') {
-            this.handleLanguageSwap(result);
-            return;
-        }
-
         if (result.transcript) {
             this.transcript.innerHTML = this.escapeHtml(result.transcript);
         }
@@ -1288,81 +1447,6 @@ class PolyTalkApp {
                     // Auto-play prevented by browser
                 });
             }
-        }
-    }
-
-    /**
-     * Handle language swap confirmation from backend
-     * @param {Object} result - Backend response with new languages
-     */
-    handleLanguageSwap(result) {
-        // Add visual separator in live translation display
-        this.appendLanguageSwapSeparator(result.source_language, result.target_language);
-
-        this.showStatus(
-            `Language swapped: ${this.getLanguageName(result.source_language)} → ${this.getLanguageName(result.target_language)}`,
-            'success'
-        );
-    }
-
-    /**
-     * Append visual separator for language swap
-     * @param {string} oldSource - Previous source language
-     * @param {string} oldTarget - Previous target language (now active)
-     */
-    appendLanguageSwapSeparator(oldSource, oldTarget) {
-        // Add to live transcript display - update existing or create new
-        if (this.liveTranscript) {
-            // First, wrap existing text in a text container if not already done
-            const existingText = this.liveTranscript.textContent || '';
-            if (existingText.trim() && !this.liveTranscript.querySelector('.live-transcript-text')) {
-                const textElement = document.createElement('div');
-                textElement.className = 'live-transcript-text';
-                textElement.textContent = existingText;
-                this.liveTranscript.innerHTML = '';
-                this.liveTranscript.appendChild(textElement);
-            }
-
-            // Check if separator already exists, update it if so
-            let separator = this.liveTranscript.querySelector('.language-swap-separator');
-            if (!separator) {
-                separator = document.createElement('div');
-                separator.className = 'language-swap-separator';
-                this.liveTranscript.appendChild(separator);
-            }
-
-            separator.innerHTML = `
-                <div class="swap-line"></div>
-                <div class="swap-text">Language swap to → ${this.getLanguageName(oldSource)}</div>
-                <div class="swap-line"></div>
-            `;
-        }
-
-        // Add to live translation display - update existing or create new
-        if (this.liveTranslation) {
-            // First, wrap existing text in a text container if not already done
-            const existingText = this.liveTranslation.textContent || '';
-            if (existingText.trim() && !this.liveTranslation.querySelector('.live-translation-text')) {
-                const textElement = document.createElement('div');
-                textElement.className = 'live-translation-text';
-                textElement.textContent = existingText;
-                this.liveTranslation.innerHTML = '';
-                this.liveTranslation.appendChild(textElement);
-            }
-
-            // Check if separator already exists, update it if so
-            let separator = this.liveTranslation.querySelector('.language-swap-separator');
-            if (!separator) {
-                separator = document.createElement('div');
-                separator.className = 'language-swap-separator';
-                this.liveTranslation.appendChild(separator);
-            }
-
-            separator.innerHTML = `
-                <div class="swap-line"></div>
-                <div class="swap-text">Language swap to → ${this.getLanguageName(oldTarget)}</div>
-                <div class="swap-line"></div>
-            `;
         }
     }
 
@@ -1429,45 +1513,49 @@ class PolyTalkApp {
         switch (state) {
             case 'connecting':
                 if (this.liveBtn) this.liveBtn.disabled = true;
+                if (this.conversationBtn) this.conversationBtn.disabled = true;
                 if (this.shareTabBtn) this.shareTabBtn.disabled = true;
                 if (this.recordingControls) this.recordingControls.style.display = 'none';
                 if (this.pauseBtn) this.pauseBtn.disabled = true;
                 if (this.stopBtn) this.stopBtn.disabled = false;
                 if (this.sessionControls) this.sessionControls.style.display = 'flex';
-                this.setRecordingIndicator('Preparing...', true);
+                this.setRecordingIndicator(this.uiText('Preparing...'), true);
                 this.setLanguageFieldsDisabled(true);
                 break;
 
             case 'streaming':
                 if (this.liveBtn) this.liveBtn.disabled = true;
+                if (this.conversationBtn) this.conversationBtn.disabled = true;
                 if (this.shareTabBtn) this.shareTabBtn.disabled = true;
                 if (this.recordingControls) this.recordingControls.style.display = 'none';
                 if (this.pauseBtn) this.pauseBtn.disabled = false;
                 if (this.stopBtn) this.stopBtn.disabled = false;
                 if (this.sessionControls) this.sessionControls.style.display = 'flex';
-                this.setRecordingIndicator('Listening...', true);
+                this.setRecordingIndicator(this.uiText('Listening...'), true);
                 this.setLanguageFieldsDisabled(true);
                 break;
 
             case 'paused':
                 if (this.liveBtn) this.liveBtn.disabled = true;
+                if (this.conversationBtn) this.conversationBtn.disabled = true;
                 if (this.shareTabBtn) this.shareTabBtn.disabled = true;
                 if (this.recordingControls) this.recordingControls.style.display = 'none';
                 if (this.pauseBtn) this.pauseBtn.disabled = false;
                 if (this.stopBtn) this.stopBtn.disabled = false;
                 if (this.sessionControls) this.sessionControls.style.display = 'flex';
-                this.setRecordingIndicator('Paused', false);
+                this.setRecordingIndicator(this.uiText('Paused'), false);
                 this.setLanguageFieldsDisabled(true);
                 break;
 
             case 'ready':
                 if (this.liveBtn) this.liveBtn.disabled = false;
+                if (this.conversationBtn) this.conversationBtn.disabled = false;
                 this.updateShareTabAvailability();
                 if (this.recordingControls) this.recordingControls.style.display = 'flex';
                 if (this.pauseBtn) this.pauseBtn.disabled = true;
                 if (this.stopBtn) this.stopBtn.disabled = true;
                 if (this.sessionControls) this.sessionControls.style.display = 'none';
-                this.setRecordingIndicator('Recording', false);
+                this.setRecordingIndicator(this.uiText('Recording'), false);
                 if (!this.preserveReadinessNotice) {
                     this.setReadinessIdle();
                 }
@@ -1478,12 +1566,13 @@ class PolyTalkApp {
                 // Fail-safe: disable language fields for unknown states
                 // This prevents changing languages during unexpected states
                 if (this.liveBtn) this.liveBtn.disabled = false;
+                if (this.conversationBtn) this.conversationBtn.disabled = false;
                 this.updateShareTabAvailability();
                 if (this.recordingControls) this.recordingControls.style.display = 'flex';
                 if (this.pauseBtn) this.pauseBtn.disabled = true;
                 if (this.stopBtn) this.stopBtn.disabled = true;
                 if (this.sessionControls) this.sessionControls.style.display = 'none';
-                this.setRecordingIndicator('Recording', false);
+                this.setRecordingIndicator(this.uiText('Recording'), false);
                 this.setLanguageFieldsDisabled(true);
         }
     }
@@ -1530,6 +1619,13 @@ class PolyTalkApp {
             this.targetLang.disabled = disabled;
             this.targetLang.style.opacity = disabled ? '0.5' : '1';
             this.targetLang.style.cursor = disabled ? 'not-allowed' : 'pointer';
+        }
+        if (this.swapLangsBtn) {
+            this.swapLangsBtn.disabled = disabled;
+            this.swapLangsBtn.setAttribute('aria-disabled', disabled ? 'true' : 'false');
+            this.swapLangsBtn.title = disabled
+                ? this.uiText('Swap is disabled during active sessions.')
+                : this.uiText('Swap Languages');
         }
     }
 

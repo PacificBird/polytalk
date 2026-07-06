@@ -68,7 +68,32 @@ class TestTTSProviderRouting:
     """Test language-specific TTS provider routing."""
 
     def test_language_provider_routing(self):
-        """Test Korean and Japanese route to Supertonic."""
+        """Test configured languages route to Supertonic."""
+        supertonic_languages = {
+            "ar",
+            "bg",
+            "hr",
+            "et",
+            "hi",
+            "ru",
+            "id",
+            "vi",
+            "pt",
+            "pl",
+            "uk",
+            "sv",
+            "da",
+            "fi",
+            "cs",
+            "el",
+            "hu",
+            "lv",
+            "lt",
+            "sk",
+            "sl",
+            "ko",
+            "ja",
+        }
         with patch("app.services.tts_service.get_config") as mock_config:
             mock_config.return_value.tts = {
                 "enabled": True,
@@ -76,18 +101,17 @@ class TestTTSProviderRouting:
                 "provider": "piper",
                 "base_url": "http://piper:5000",
                 "language_providers": {
-                    "ko": "supertonic",
-                    "ko_KR": "supertonic",
-                    "ja": "supertonic",
-                    "ja_JP": "supertonic",
+                    language: "supertonic" for language in supertonic_languages
                 },
             }
             mock_config.return_value.app = {}
             service = TTSService()
 
-            assert service._get_provider_for_language("ko") == "supertonic"
+            for language in supertonic_languages:
+                assert service._get_provider_for_language(language) == "supertonic"
             assert service._get_provider_for_language("ko-KR") == "supertonic"
             assert service._get_provider_for_language("ja-JP") == "supertonic"
+            assert service._get_provider_for_language("zh") == "piper"
             assert service._get_provider_for_language("en") == "piper"
 
     def test_supertonic_voice_routing(self):

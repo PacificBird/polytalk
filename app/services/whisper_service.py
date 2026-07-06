@@ -46,6 +46,8 @@ class WhisperService(BaseTranscriptionService):
         self,
         audio_generator: AsyncGenerator[bytes, None],
         language: Optional[str] = None,
+        emit_policy: str = "live",
+        candidate_languages: Optional[list[str]] = None,
         on_result: Optional[Callable[[TranscriptionResult], None]] = None,
     ) -> AsyncGenerator[TranscriptionResult, None]:
         """
@@ -54,6 +56,8 @@ class WhisperService(BaseTranscriptionService):
         Args:
             audio_generator: Async generator yielding audio chunks
             language: Optional source language code hint
+            emit_policy: STT emission policy, either live or pause
+            candidate_languages: Optional language candidates for detection
             on_result: Optional callback for each transcription result
 
         Yields:
@@ -78,7 +82,12 @@ class WhisperService(BaseTranscriptionService):
             return
 
         try:
-            async for result in self._real_stream_transcribe(audio_generator, language):
+            async for result in self._real_stream_transcribe(
+                audio_generator,
+                language,
+                emit_policy=emit_policy,
+                candidate_languages=candidate_languages,
+            ):
                 yield result
                 if on_result:
                     on_result(result)
@@ -104,6 +113,8 @@ class WhisperService(BaseTranscriptionService):
         self,
         audio_generator: AsyncGenerator[bytes, None],
         language: Optional[str] = None,
+        emit_policy: str = "live",
+        candidate_languages: Optional[list[str]] = None,
     ) -> AsyncGenerator[TranscriptionResult, None]:
         """
         Stream audio chunks using WebSocket for real-time transcription.
@@ -111,6 +122,8 @@ class WhisperService(BaseTranscriptionService):
         Args:
             audio_generator: Async generator yielding audio chunks
             language: Optional source language code hint
+            emit_policy: STT emission policy, either live or pause
+            candidate_languages: Optional language candidates for detection
 
         Yields:
             TranscriptionResult with incremental transcription updates
@@ -143,8 +156,19 @@ class WhisperService(BaseTranscriptionService):
                 )
                 logger.info("WebSocket connection established")
 
+                control_message = {}
                 if language_hint:
-                    await ws.send(json.dumps({"language": language_hint}))
+                    control_message["language"] = language_hint
+                if emit_policy:
+                    control_message["emit_policy"] = emit_policy
+                if candidate_languages:
+                    control_message["candidate_languages"] = [
+                        self._normalize_language_hint(item)
+                        for item in candidate_languages
+                        if item
+                    ]
+                if control_message:
+                    await ws.send(json.dumps(control_message))
 
                 # Use asyncio Queue to communicate between tasks
                 result_queue = asyncio.Queue()
@@ -191,6 +215,19 @@ class WhisperService(BaseTranscriptionService):
                         while True:
                             response = await ws.recv()
                             result_data = json.loads(response)
+
+                            if result_data.get("type") == "emit_policy_ack":
+                                logger.debug(
+                                    "STT emit policy acknowledged: "
+                                    f"{result_data.get('emit_policy')}"
+                                )
+                                continue
+                            if result_data.get("type") == "candidate_languages_ack":
+                                logger.debug(
+                                    "STT candidate languages acknowledged: "
+                                    f"{result_data.get('candidate_languages')}"
+                                )
+                                continue
 
                             text = result_data.get("text", "")
                             is_final = result_data.get("is_final", False)
@@ -347,6 +384,8 @@ class WhisperService(BaseTranscriptionService):
         Args:
             audio_generator: Async generator yielding audio chunks (ignored in mock mode)
             language: Optional source language code hint
+            emit_policy: STT emission policy, either live or pause
+            candidate_languages: Optional language candidates for detection
 
         Yields:
             Mock TranscriptionResult with incremental updates

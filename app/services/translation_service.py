@@ -7,15 +7,15 @@ Translation service using configurable LLM translation API formats.
 Supports both real API and mock mode for testing.
 """
 
-
 from typing import Any, Optional
 
 import httpx
 
 from .base import BaseTranslationService, TranslationResult
 from ..config import get_config
-from ..utils.config import parse_bool_config
+from ..utils.config import get_custom_instruction_max_chars, parse_bool_config
 from ..utils.logger import get_logger
+from ..utils.sanitize import normalize_instruction
 
 logger = get_logger(__name__)
 
@@ -55,6 +55,14 @@ SUPPORTED_API_FORMATS = {
     "gemini_generate_content",
 }
 
+PROVIDER_ROUTING_CONFIG_KEYS = frozenset(
+    {
+        "providers",
+        "default_provider",
+        "routing",
+    }
+)
+
 
 def _config_value(value: object, default: str) -> str:
     """Return a default for missing or unresolved ${VAR} config values."""
@@ -87,7 +95,13 @@ class TranslationService(BaseTranslationService):
         self.api_format = _config_value(self.config.get("api_format"), "openai_chat")
         self.api_key = _config_value(self.config.get("api_key"), "")
         self.model = _config_value(self.config.get("model"), "qwen3-8b")
-        self.temperature = self.config.get("temperature", 0.1)
+        try:
+            self.temperature = float(self.config.get("temperature", 0.1))
+        except (TypeError, ValueError):
+            self.temperature = 0.1
+        self.providers = self.config.get("providers", {})
+        self.default_provider = self.config.get("default_provider")
+        self.routing = self.config.get("routing", [])
         self.context_enabled = parse_bool_config(
             self.config.get("context_enabled"), True
         )
@@ -117,10 +131,15 @@ class TranslationService(BaseTranslationService):
         except (TypeError, ValueError):
             self.context_payload_warn_chars = 2000
 
+        self.custom_instruction_max_chars = get_custom_instruction_max_chars(
+            self.config.get("custom_instruction_max_chars")
+        )
+
         logger.info(
             "TranslationService initialized: "
             f"enabled={self.enabled}, mock_mode={self.mock_mode}, "
-            f"api_format={self.api_format}, context_enabled={self.context_enabled}"
+            f"api_format={self.api_format}, context_enabled={self.context_enabled}, "
+            f"providers={len(self.providers)}, routing_rules={len(self.routing)}"
         )
 
     async def translate(
@@ -130,6 +149,7 @@ class TranslationService(BaseTranslationService):
         target_language: str,
         context: Optional[list[dict[str, str]]] = None,
         visual_context: Optional[str] = None,
+        custom_instruction: Optional[str] = None,
     ) -> TranslationResult:
         """
         Translate text from source to target language.
@@ -142,6 +162,7 @@ class TranslationService(BaseTranslationService):
                 read-only context
             visual_context: Optional shared tab/page visual summary to use as
                 a read-only hint
+            custom_instruction: Optional user-provided translation guidance
 
         Returns:
             TranslationResult with translated text
@@ -167,6 +188,7 @@ class TranslationService(BaseTranslationService):
                 target_language,
                 context=context,
                 visual_context=visual_context,
+                custom_instruction=custom_instruction,
             )
         except Exception as e:
             logger.error(f"Translation failed: {e}")
@@ -226,25 +248,214 @@ class TranslationService(BaseTranslationService):
         base_language = normalized.split("_", 1)[0]
         return LANGUAGE_DISPLAY_NAMES.get(base_language, language)
 
-    def _build_system_prompt(self, source_language: str, target_language: str) -> str:
+    def _build_system_prompt(
+        self,
+        source_language: str,
+        target_language: str,
+        system_prompt_template: str | None = None,
+    ) -> str:
         source_language_name = self._language_display_name(source_language)
         target_language_name = self._language_display_name(target_language)
-        return self.system_prompt_template.format(
+        return (system_prompt_template or self.system_prompt_template).format(
             source_language=source_language_name,
             target_language=target_language_name,
             source_language_code=source_language,
             target_language_code=target_language,
         )
 
-    def _build_url(self) -> str:
-        """Build the provider URL, substituting {model} when present."""
-        endpoint = self.endpoint.format(model=self.model)
-        return f"{self.base_url.rstrip('/')}/{endpoint.lstrip('/')}"
+    def _legacy_provider_config(self) -> dict[str, Any]:
+        """Return current flat translation settings as the default provider."""
+        return {
+            key: value
+            for key, value in {
+                **self.config,
+                "base_url": self.base_url,
+                "endpoint": self.endpoint,
+                "api_format": self.api_format,
+                "api_key": self.api_key,
+                "model": self.model,
+                "temperature": self.temperature,
+                "max_tokens": self.max_tokens,
+                "system_prompt": self.system_prompt_template,
+            }.items()
+            if key not in PROVIDER_ROUTING_CONFIG_KEYS
+        }
 
-    def _bearer_headers(self) -> dict[str, str]:
+    def _get_provider_config(self, provider_name: str | None) -> dict[str, Any]:
+        """Return provider config merged over flat translation defaults."""
+        provider_config = self._legacy_provider_config()
+        if not provider_name:
+            return provider_config
+
+        configured_provider = self.providers.get(provider_name)
+        if configured_provider is None:
+            raise ValueError(f"Unknown translation provider '{provider_name}'")
+        if not isinstance(configured_provider, dict):
+            raise ValueError(
+                f"Translation provider '{provider_name}' must be a mapping"
+            )
+
+        provider_config.update(configured_provider)
+        return provider_config
+
+    def _configured_default_provider_config(self) -> dict[str, Any]:
+        """Resolve the configured default provider with flat config fallback."""
+        if self.default_provider:
+            return self._get_provider_config(str(self.default_provider))
+        return self._get_provider_config(None)
+
+    def _normalize_language_code(self, language: str) -> tuple[str, str]:
+        """Return normalized exact and base language codes for matching."""
+        normalized = (language or "").replace("-", "_").lower()
+        return normalized, normalized.split("_", 1)[0]
+
+    def _language_rule_matches(
+        self,
+        rule_languages: object,
+        language: str,
+        *,
+        rule_index: int | None = None,
+        field_name: str = "language",
+    ) -> bool:
+        """Return whether a routing language field matches a request language."""
+        if rule_languages in (None, ""):
+            return True
+
+        if isinstance(rule_languages, str):
+            languages = [rule_languages]
+        elif isinstance(rule_languages, (list, tuple, set)):
+            languages = list(rule_languages)
+        else:
+            logger.warning(
+                "Skipping invalid translation routing language matcher: "
+                f"index={rule_index} field={field_name} "
+                f"type={type(rule_languages).__name__}"
+            )
+            return False
+
+        if not languages:
+            logger.warning(
+                "Skipping empty translation routing language matcher: "
+                f"index={rule_index} field={field_name}"
+            )
+            return False
+
+        normalized_language, base_language = self._normalize_language_code(language)
+        for configured_language in languages:
+            configured = str(configured_language).strip()
+            if configured == "*":
+                return True
+            normalized_configured, _ = self._normalize_language_code(configured)
+            if normalized_configured in {normalized_language, base_language}:
+                return True
+        return False
+
+    def _rule_priority(self, rule: dict[str, Any]) -> int:
+        """Parse a routing rule priority with a low-priority fallback."""
+        try:
+            return int(rule.get("priority", 1000))
+        except (TypeError, ValueError):
+            return 1000
+
+    def _routing_rule_matches(
+        self,
+        rule: dict[str, Any],
+        source_language: str,
+        target_language: str,
+        *,
+        rule_index: int | None = None,
+    ) -> bool:
+        source_languages = rule.get("source_langs", rule.get("source_lang"))
+        target_languages = rule.get("target_langs", rule.get("target_lang"))
+        return self._language_rule_matches(
+            source_languages,
+            source_language,
+            rule_index=rule_index,
+            field_name="source_langs",
+        ) and self._language_rule_matches(
+            target_languages,
+            target_language,
+            rule_index=rule_index,
+            field_name="target_langs",
+        )
+
+    def _resolve_provider_config(
+        self, source_language: str, target_language: str
+    ) -> dict[str, Any]:
+        """Resolve translation provider by priority-based language routing."""
+        matching_rules = []
+        for index, rule in enumerate(self.routing):
+            if not isinstance(rule, dict):
+                logger.warning(
+                    "Skipping invalid translation routing rule: "
+                    f"index={index} type={type(rule).__name__}"
+                )
+                continue
+            if not rule:
+                logger.warning(
+                    f"Skipping empty translation routing rule: index={index}"
+                )
+                continue
+            if self._routing_rule_matches(
+                rule, source_language, target_language, rule_index=index
+            ):
+                matching_rules.append((self._rule_priority(rule), index, rule))
+
+        if not matching_rules:
+            return self._configured_default_provider_config()
+
+        _, _, selected_rule = min(matching_rules, key=lambda item: (item[0], item[1]))
+        provider_name = selected_rule.get("provider")
+        if not provider_name:
+            raise ValueError("Translation routing rule is missing provider")
+
+        return self._get_provider_config(str(provider_name))
+
+    def _provider_value(
+        self, provider_config: dict[str, Any], key: str, default: str
+    ) -> str:
+        """Read a string provider value with unresolved env fallback handling."""
+        return _config_value(provider_config.get(key), default)
+
+    def _provider_int(
+        self, provider_config: dict[str, Any], key: str, default: int
+    ) -> int:
+        """Read an integer provider value with a safe fallback."""
+        try:
+            return int(provider_config.get(key, default))
+        except (TypeError, ValueError):
+            return default
+
+    def _provider_float(
+        self, provider_config: dict[str, Any], key: str, default: float
+    ) -> float:
+        """Read a float provider value with a safe fallback."""
+        try:
+            return float(provider_config.get(key, default))
+        except (TypeError, ValueError):
+            return default
+
+    def _build_url(self, provider_config: dict[str, Any] | None = None) -> str:
+        """Build the provider URL, substituting {model} when present."""
+        provider_config = provider_config or self._legacy_provider_config()
+        base_url = self._provider_value(
+            provider_config, "base_url", "https://ai.example.com"
+        )
+        endpoint = self._provider_value(
+            provider_config, "endpoint", "/v1/chat/completions"
+        )
+        model = self._provider_value(provider_config, "model", "qwen3-8b")
+        endpoint = endpoint.replace("{model}", model)
+        return f"{base_url.rstrip('/')}/{endpoint.lstrip('/')}"
+
+    def _bearer_headers(
+        self, provider_config: dict[str, Any] | None = None
+    ) -> dict[str, str]:
+        provider_config = provider_config or self._legacy_provider_config()
+        api_key = self._provider_value(provider_config, "api_key", "")
         headers = {"Content-Type": "application/json"}
-        if self.api_key:
-            headers["Authorization"] = f"Bearer {self.api_key}"
+        if api_key:
+            headers["Authorization"] = f"Bearer {api_key}"
         return headers
 
     def _format_contextual_user_text(
@@ -276,8 +487,7 @@ class TranslationService(BaseTranslationService):
         if context_lines:
             previous_context = "\n".join(context_lines)
             sections.append(
-                "Previous conversation context for reference only:\n"
-                f"{previous_context}"
+                f"Previous conversation context for reference only:\n{previous_context}"
             )
 
         if not sections:
@@ -296,8 +506,39 @@ class TranslationService(BaseTranslationService):
         target_language: str,
         context: Optional[list[dict[str, str]]],
         visual_context: Optional[str] = None,
+        custom_instruction: Optional[str] = None,
+        system_prompt_template: str | None = None,
     ) -> str:
-        system_prompt = self._build_system_prompt(source_language, target_language)
+        """Build the system prompt with optional context and user guidance.
+
+        Args:
+            source_language: Source language code or name.
+            target_language: Target language code or name.
+            context: Prior transcript/translation pairs used as read-only context.
+            visual_context: Shared tab/page summary used as a read-only hint.
+            custom_instruction: User-provided translation guidance.
+            system_prompt_template: Optional provider-specific prompt template.
+
+        Returns:
+            System prompt for the translation request.
+        """
+        system_prompt = self._build_system_prompt(
+            source_language,
+            target_language,
+            system_prompt_template=system_prompt_template,
+        )
+        if custom_instruction:
+            system_prompt = (
+                f"{system_prompt}\n\nUser translation instruction (high priority): "
+                "Follow this user-provided style, tone, terminology, and "
+                "speaker-persona guidance for the current translation while "
+                "preserving the source meaning. If the source text is "
+                "gender-neutral but the instruction specifies speaker gender, "
+                "persona, or voice, choose target-language grammar and verb "
+                "forms that match that instruction. Do not mention the "
+                "instruction or add explanations. Instruction: "
+                f"{custom_instruction}"
+            )
         if not self.context_enabled or (not context and not visual_context):
             return system_prompt
         return (
@@ -315,17 +556,32 @@ class TranslationService(BaseTranslationService):
         target_language: str,
         context: Optional[list[dict[str, str]]] = None,
         visual_context: Optional[str] = None,
+        custom_instruction: Optional[str] = None,
+        provider_config: dict[str, Any] | None = None,
     ) -> tuple[str, dict[str, str], dict[str, Any]]:
         """Build provider-specific request details for a translation call."""
-        api_format = self.api_format
+        provider_config = provider_config or self._resolve_provider_config(
+            source_language, target_language
+        )
+        api_format = self._provider_value(provider_config, "api_format", "openai_chat")
         if api_format not in SUPPORTED_API_FORMATS:
             supported = ", ".join(sorted(SUPPORTED_API_FORMATS))
             raise ValueError(
                 f"Unsupported translation api_format '{api_format}'. Use one of: {supported}"
             )
 
+        sanitized_custom_instruction = self._sanitize_custom_instruction(
+            custom_instruction
+        )
         system_prompt = self._build_contextual_system_prompt(
-            source_language, target_language, context, visual_context=visual_context
+            source_language,
+            target_language,
+            context,
+            visual_context=visual_context,
+            custom_instruction=sanitized_custom_instruction,
+            system_prompt_template=self._provider_value(
+                provider_config, "system_prompt", self.system_prompt_template
+            ),
         )
         user_text = self._format_contextual_user_text(
             text, context, visual_context=visual_context
@@ -340,58 +596,65 @@ class TranslationService(BaseTranslationService):
                 f"chars={prompt_chars} threshold={self.context_payload_warn_chars} "
                 f"system_chars={len(system_prompt)} user_chars={len(user_text)} "
                 f"context_items={len(context or [])} "
-                f"visual_context_chars={len(visual_context or '')}"
+                f"visual_context_chars={len(visual_context or '')} "
+                f"custom_instruction_chars={len(sanitized_custom_instruction)}"
             )
-        url = self._build_url()
+        url = self._build_url(provider_config)
+        model = self._provider_value(provider_config, "model", "qwen3-8b")
+        temperature = self._provider_float(provider_config, "temperature", 0.1)
+        max_tokens = self._provider_int(provider_config, "max_tokens", 240)
+        api_key = self._provider_value(provider_config, "api_key", "")
 
         if api_format == "openai_chat":
             payload = {
-                "model": self.model,
+                "model": model,
                 "messages": [
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_text},
                 ],
-                "temperature": self.temperature,
-                "max_tokens": self.max_tokens,
+                "temperature": temperature,
+                "max_tokens": max_tokens,
             }
-            return url, self._bearer_headers(), payload
+            return url, self._bearer_headers(provider_config), payload
 
         if api_format == "openai_responses":
             payload = {
-                "model": self.model,
+                "model": model,
                 "instructions": system_prompt,
                 "input": user_text,
-                "temperature": self.temperature,
-                "max_output_tokens": self.max_tokens,
+                "temperature": temperature,
+                "max_output_tokens": max_tokens,
             }
-            return url, self._bearer_headers(), payload
+            return url, self._bearer_headers(provider_config), payload
 
         if api_format == "anthropic_messages":
             headers = {
                 "Content-Type": "application/json",
-                "x-api-key": self.api_key,
-                "anthropic-version": self.config.get("anthropic_version", "2023-06-01"),
+                "x-api-key": api_key,
+                "anthropic-version": self._provider_value(
+                    provider_config, "anthropic_version", "2023-06-01"
+                ),
             }
             payload = {
-                "model": self.model,
+                "model": model,
                 "system": system_prompt,
                 "messages": [{"role": "user", "content": user_text}],
-                "temperature": self.temperature,
-                "max_tokens": self.max_tokens,
+                "temperature": temperature,
+                "max_tokens": max_tokens,
             }
             return url, headers, payload
 
         headers = {"Content-Type": "application/json"}
-        if self.api_key:
-            headers["x-goog-api-key"] = self.api_key
+        if api_key:
+            headers["x-goog-api-key"] = api_key
         payload = {
             "systemInstruction": {"parts": [{"text": system_prompt}]},
             "contents": [
                 {"role": "user", "parts": [{"text": user_text}]},
             ],
             "generationConfig": {
-                "temperature": self.temperature,
-                "maxOutputTokens": self.max_tokens,
+                "temperature": temperature,
+                "maxOutputTokens": max_tokens,
             },
         }
         return url, headers, payload
@@ -405,9 +668,12 @@ class TranslationService(BaseTranslationService):
                     text_parts.append(block_text)
         return "".join(text_parts).strip()
 
-    def _parse_translation_response(self, result: dict[str, Any]) -> str:
+    def _parse_translation_response(
+        self, result: dict[str, Any], provider_config: dict[str, Any] | None = None
+    ) -> str:
         """Extract translated text from a provider-specific response body."""
-        api_format = self.api_format
+        provider_config = provider_config or self._legacy_provider_config()
+        api_format = self._provider_value(provider_config, "api_format", "openai_chat")
 
         try:
             if api_format == "openai_chat":
@@ -452,6 +718,7 @@ class TranslationService(BaseTranslationService):
         target_language: str,
         context: Optional[list[dict[str, str]]] = None,
         visual_context: Optional[str] = None,
+        custom_instruction: Optional[str] = None,
     ) -> TranslationResult:
         """
         Translate text using the configured real translation API format.
@@ -464,16 +731,22 @@ class TranslationService(BaseTranslationService):
                 read-only context
             visual_context: Optional shared tab/page visual summary to use as
                 a read-only hint
+            custom_instruction: Optional user-provided translation guidance
 
         Returns:
             TranslationResult with translated text
         """
+        provider_config = self._resolve_provider_config(
+            source_language, target_language
+        )
         url, headers, payload = self._build_translation_request(
             text,
             source_language,
             target_language,
             context=context,
             visual_context=visual_context,
+            custom_instruction=custom_instruction,
+            provider_config=provider_config,
         )
 
         response = await self._http_client.post(url, headers=headers, json=payload)
@@ -486,9 +759,10 @@ class TranslationService(BaseTranslationService):
                 f"Failed to parse JSON response: {response.text}"
             ) from json_err
 
-        translated_text = self._parse_translation_response(result)
+        translated_text = self._parse_translation_response(result, provider_config)
+        api_format = self._provider_value(provider_config, "api_format", "openai_chat")
         if not translated_text:
-            raise ValueError(f"Empty {self.api_format} translation response: {result}")
+            raise ValueError(f"Empty {api_format} translation response: {result}")
 
         logger.info(
             f"Real translation complete: {text[:30]}... -> {translated_text[:30]}..."
@@ -500,6 +774,10 @@ class TranslationService(BaseTranslationService):
             target_language=target_language,
             success=True,
         )
+
+    def _sanitize_custom_instruction(self, value: Optional[str]) -> str:
+        """Normalize and bound user-provided translation guidance."""
+        return normalize_instruction(value, self.custom_instruction_max_chars)
 
     async def close(self) -> None:
         """Close the HTTP client connection pool."""

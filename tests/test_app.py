@@ -5,6 +5,7 @@ Comprehensive tests for PolyTalk application.
 import asyncio
 import importlib.util
 import os
+import time
 from pathlib import Path
 from unittest.mock import patch
 import sys
@@ -391,6 +392,44 @@ class TestServices:
         assert "Shared tab/page visual context hint" in user_text
         assert "Odoo Inventory Overview" in user_text
         assert "Move it to stock." in user_text
+
+    def test_translation_custom_instruction_is_prompted_and_bounded(self):
+        """Test user translation guidance is added to the system prompt only."""
+        from app.services.translation_service import TranslationService
+
+        service = TranslationService()
+        service.api_format = "openai_chat"
+        service.base_url = "https://api.openai.com"
+        service.endpoint = "/v1/chat/completions"
+        service.api_key = "test-key"
+        service.model = "gpt-4o-mini"
+        service.temperature = 0.0
+        service.max_tokens = 123
+        service.context_enabled = True
+        service.system_prompt_template = (
+            "Translate {source_language} to {target_language}."
+        )
+        instruction = "Keep   product names in English.\n" + ("x" * 260)
+
+        _, _, payload = service._build_translation_request(
+            "Move it to stock.",
+            "en",
+            "de",
+            custom_instruction=instruction,
+        )
+
+        system_prompt = payload["messages"][0]["content"]
+        user_text = payload["messages"][1]["content"]
+
+        assert "User translation instruction (high priority)" in system_prompt
+        assert "speaker gender, persona, or voice" in system_prompt
+        assert "target-language grammar and verb forms" in system_prompt
+        assert "Keep product names in English." in system_prompt
+        assert (
+            len(service._sanitize_custom_instruction(instruction))
+            == service.custom_instruction_max_chars
+        )
+        assert instruction not in user_text
 
     def test_translation_warns_for_large_context_payload(self, caplog):
         """Test large contextual payloads log sizes without prompt contents."""
@@ -820,6 +859,7 @@ class TestServices:
                 target_language,
                 context=None,
                 visual_context=None,
+                custom_instruction=None,
             ):
                 self.calls.append((text, source_language, target_language))
                 return TranslationResult(
@@ -901,6 +941,7 @@ class TestServices:
                 target_language,
                 context=None,
                 visual_context=None,
+                custom_instruction=None,
             ):
                 self.calls.append((text, source_language, target_language))
                 return TranslationResult(
@@ -984,6 +1025,7 @@ class TestServices:
                 target_language,
                 context=None,
                 visual_context=None,
+                custom_instruction=None,
             ):
                 copied_context = [dict(item) for item in context] if context else None
                 self.calls.append(
@@ -1084,6 +1126,7 @@ class TestServices:
                 target_language,
                 context=None,
                 visual_context=None,
+                custom_instruction=None,
             ):
                 self.calls.append(visual_context)
                 return TranslationResult(
@@ -1466,6 +1509,206 @@ class TestSTTCadence:
         assert result["metrics"]["force_emit"] is True
         assert captured_audio == [voice]
 
+    def test_stt_pause_emit_policy_ignores_regular_chunk_size_flush(self):
+        """Test pause mode does not emit just because the stream window is full."""
+        from fastapi.testclient import TestClient
+
+        stt_main = load_stt_main_module(
+            {
+                "STT_SAMPLE_RATE": "10",
+                "STT_SAMPLE_WIDTH_BYTES": "2",
+                "STT_STREAM_CHUNK_SECONDS": "0.2",
+                "STT_IDLE_FLUSH_SECONDS": "0.05",
+                "STT_EMIT_MIN_CHARS": "1",
+                "STT_TRANSCRIBE_WORKERS": "1",
+            }
+        )
+        voice = (10000).to_bytes(2, "little", signed=True) * 4
+        captured_force_emit = []
+
+        def fake_process_transcribe_job(model, job):
+            captured_force_emit.append(job.force_emit)
+            return stt_main.TranscribeResult(
+                sequence=job.sequence,
+                transcript="hello",
+                has_speech=True,
+                detected_language="en",
+                force_emit=job.force_emit,
+            )
+
+        stt_main._get_model = lambda: object()
+        stt_main._process_transcribe_job = fake_process_transcribe_job
+
+        with TestClient(stt_main.app) as client:
+            with client.websocket_connect("/v1/stream/transcriptions") as websocket:
+                websocket.send_text('{"emit_policy":"pause"}')
+                assert websocket.receive_json() == {
+                    "type": "emit_policy_ack",
+                    "emit_policy": "pause",
+                }
+                websocket.send_bytes(voice)
+                result = websocket.receive_json()
+
+        assert result["text"] == "hello"
+        assert result["metrics"]["force_emit"] is True
+        assert captured_force_emit == [True]
+
+    def test_stt_acknowledges_candidate_languages_control_message(self):
+        """Test STT normalizes and acknowledges candidate language controls."""
+        from fastapi.testclient import TestClient
+
+        stt_main = load_stt_main_module(
+            {"STT_PRELOAD_MODEL": "false", "STT_TRANSCRIBE_WORKERS": "1"}
+        )
+        stt_main._get_model = lambda: object()
+
+        with TestClient(stt_main.app) as client:
+            with client.websocket_connect("/v1/stream/transcriptions") as websocket:
+                websocket.send_text(
+                    '{"candidate_languages":["en-US","hi","en","",null]}'
+                )
+                result = websocket.receive_json()
+
+        assert result == {
+            "type": "candidate_languages_ack",
+            "candidate_languages": ["en", "hi"],
+        }
+
+    def test_stt_idle_flush_emits_when_audio_chunks_stop_after_voice(self):
+        """Test active speech is flushed if no more audio arrives after a short idle gap."""
+        from fastapi.testclient import TestClient
+
+        stt_main = load_stt_main_module(
+            {
+                "STT_SAMPLE_RATE": "10",
+                "STT_SAMPLE_WIDTH_BYTES": "2",
+                "STT_STREAM_CHUNK_SECONDS": "10",
+                "STT_IDLE_FLUSH_SECONDS": "0.05",
+                "STT_VAD_SPEECH_PAD_MS": "0",
+                "STT_EMIT_MIN_CHARS": "100",
+                "STT_EMIT_INTERVAL_SECONDS": "999",
+                "STT_TRANSCRIBE_WORKERS": "1",
+            }
+        )
+        voice = (10000).to_bytes(2, "little", signed=True) * 4
+        captured_force_emit = []
+
+        def fake_process_transcribe_job(model, job):
+            captured_force_emit.append(job.force_emit)
+            return stt_main.TranscribeResult(
+                sequence=job.sequence,
+                transcript="hello",
+                has_speech=True,
+                detected_language="en",
+                force_emit=job.force_emit,
+            )
+
+        stt_main._get_model = lambda: object()
+        stt_main._process_transcribe_job = fake_process_transcribe_job
+
+        with TestClient(stt_main.app) as client:
+            with client.websocket_connect("/v1/stream/transcriptions") as websocket:
+                websocket.send_text('{"emit_policy":"pause"}')
+                assert websocket.receive_json() == {
+                    "type": "emit_policy_ack",
+                    "emit_policy": "pause",
+                }
+                websocket.send_bytes(voice)
+                result = websocket.receive_json()
+
+        assert result["text"] == "hello"
+        assert result["metrics"]["force_emit"] is True
+        assert captured_force_emit == [True]
+
+    def test_stt_idle_flush_does_not_change_live_emit_cadence(self):
+        """Test idle flush does not force live-mode STT emissions."""
+        from fastapi.testclient import TestClient
+
+        stt_main = load_stt_main_module(
+            {
+                "STT_SAMPLE_RATE": "10",
+                "STT_SAMPLE_WIDTH_BYTES": "2",
+                "STT_STREAM_CHUNK_SECONDS": "0.8",
+                "STT_IDLE_FLUSH_SECONDS": "0.05",
+                "STT_VAD_SPEECH_PAD_MS": "0",
+                "STT_EMIT_MIN_CHARS": "1",
+                "STT_EMIT_INTERVAL_SECONDS": "999",
+                "STT_TRANSCRIBE_WORKERS": "1",
+            }
+        )
+        voice = (10000).to_bytes(2, "little", signed=True) * 4
+        captured_force_emit = []
+
+        def fake_process_transcribe_job(model, job):
+            captured_force_emit.append(job.force_emit)
+            return stt_main.TranscribeResult(
+                sequence=job.sequence,
+                transcript="hello",
+                has_speech=True,
+                detected_language="en",
+                force_emit=job.force_emit,
+            )
+
+        stt_main._get_model = lambda: object()
+        stt_main._process_transcribe_job = fake_process_transcribe_job
+
+        with TestClient(stt_main.app) as client:
+            with client.websocket_connect("/v1/stream/transcriptions") as websocket:
+                websocket.send_bytes(voice)
+                time.sleep(0.1)
+                websocket.send_bytes(voice)
+                result = websocket.receive_json()
+
+        assert result["text"] == "hello"
+        assert result["metrics"]["force_emit"] is False
+        assert captured_force_emit == [False]
+
+    def test_stt_pause_emit_policy_flushes_pending_transcript_without_new_text(self):
+        """Test pause-only mode emits held text when pause flush adds no new words."""
+        from fastapi.testclient import TestClient
+
+        stt_main = load_stt_main_module(
+            {
+                "STT_SAMPLE_RATE": "10",
+                "STT_SAMPLE_WIDTH_BYTES": "2",
+                "STT_STREAM_CHUNK_SECONDS": "0.2",
+                "STT_CHUNK_OVERLAP_SECONDS": "0.2",
+                "STT_PAUSE_FLUSH_SECONDS": "0.2",
+                "STT_VAD_SPEECH_PAD_MS": "0",
+                "STT_EMIT_MIN_CHARS": "100",
+                "STT_EMIT_INTERVAL_SECONDS": "999",
+                "STT_TRANSCRIBE_WORKERS": "1",
+            }
+        )
+        voice = (10000).to_bytes(2, "little", signed=True) * 4
+        silence = b"\x00\x00" * 2
+
+        def fake_process_transcribe_job(model, job):
+            return stt_main.TranscribeResult(
+                sequence=job.sequence,
+                transcript="hello",
+                has_speech=True,
+                detected_language="en",
+                force_emit=job.force_emit,
+            )
+
+        stt_main._get_model = lambda: object()
+        stt_main._process_transcribe_job = fake_process_transcribe_job
+
+        with TestClient(stt_main.app) as client:
+            with client.websocket_connect("/v1/stream/transcriptions") as websocket:
+                websocket.send_text('{"emit_policy":"pause"}')
+                assert websocket.receive_json() == {
+                    "type": "emit_policy_ack",
+                    "emit_policy": "pause",
+                }
+                websocket.send_bytes(voice)
+                websocket.send_bytes(silence)
+                result = websocket.receive_json()
+
+        assert result["text"] == "hello"
+        assert result["metrics"]["force_emit"] is True
+
     def test_stt_transcribe_job_preserves_pause_force_emit(self):
         """Test pause-flushed jobs remain emit-eligible after inference."""
         stt_main = load_stt_main_module()
@@ -1478,6 +1721,7 @@ class TestSTTCadence:
             sequence=1,
             audio_bytes=(1000).to_bytes(2, "little", signed=True) * 1000,
             language="en",
+            candidate_languages=(),
             task="transcribe",
             queued_at=1.0,
             queue_depth_at_enqueue=0,
@@ -1496,6 +1740,7 @@ class TestSTTCadence:
             sequence=1,
             audio_bytes=b"\x00\x00" * 100,
             language="en",
+            candidate_languages=(),
             task="transcribe",
             queued_at=1.0,
             queue_depth_at_enqueue=0,

@@ -60,6 +60,7 @@ TRANSCRIBE_QUEUE_SIZE = int(os.environ.get("STT_TRANSCRIBE_QUEUE_SIZE", "8"))
 EMIT_MIN_CHARS = int(os.environ.get("STT_EMIT_MIN_CHARS", "40"))
 EMIT_INTERVAL_SECONDS = float(os.environ.get("STT_EMIT_INTERVAL_SECONDS", "2.0"))
 PAUSE_FLUSH_SECONDS = float(os.environ.get("STT_PAUSE_FLUSH_SECONDS", "1.0"))
+IDLE_FLUSH_SECONDS = float(os.environ.get("STT_IDLE_FLUSH_SECONDS", "3.0"))
 LEADING_SILENCE_PREROLL_SECONDS = float(
     os.environ.get("STT_LEADING_SILENCE_PREROLL_SECONDS", "0.2")
 )
@@ -105,6 +106,7 @@ class TranscribeJob:
     sequence: int
     audio_bytes: bytes
     language: Optional[str]
+    candidate_languages: tuple[str, ...]
     task: str
     queued_at: float
     queue_depth_at_enqueue: int
@@ -142,6 +144,26 @@ def _get_model() -> WhisperModel:
             num_workers=MODEL_WORKERS,
         )
     return _model
+
+
+def _normalize_language_code(language: Optional[str]) -> Optional[str]:
+    """Normalize a UI/provider language code to a base STT language code."""
+    if not language:
+        return None
+    return str(language).replace("-", "_").split("_")[0].lower() or None
+
+
+def _normalize_candidate_languages(value: object) -> tuple[str, ...]:
+    """Normalize candidate language control-message values."""
+    if not isinstance(value, list):
+        return ()
+
+    normalized: list[str] = []
+    for item in value:
+        code = _normalize_language_code(item if isinstance(item, str) else None)
+        if code and code not in normalized:
+            normalized.append(code)
+    return tuple(normalized)
 
 
 def _calculate_rms(audio_bytes: bytes) -> float:
@@ -503,7 +525,9 @@ async def stream_transcription(
     stop_event = asyncio.Event()
 
     current_language = language
+    current_candidate_languages: tuple[str, ...] = ()
     current_task = task
+    current_emit_policy = "live"
     audio_chunks = []
     total_size = 0
     next_sequence = 0
@@ -514,7 +538,13 @@ async def stream_transcription(
 
     async def receive_audio() -> None:
         """Receive WebSocket audio and enqueue PCM windows."""
-        nonlocal current_language, current_task, total_size, next_sequence
+        nonlocal \
+            current_language, \
+            current_candidate_languages, \
+            current_task, \
+            current_emit_policy, \
+            total_size, \
+            next_sequence
         current_window_has_voice = False
         trailing_silence_bytes = 0
         leading_silence_preroll_chunks: list[bytes] = []
@@ -556,6 +586,7 @@ async def stream_transcription(
                 sequence=next_sequence,
                 audio_bytes=job_audio_bytes,
                 language=current_language,
+                candidate_languages=current_candidate_languages,
                 task=current_task,
                 queued_at=queued_at,
                 queue_depth_at_enqueue=queue_depth_before,
@@ -597,7 +628,24 @@ async def stream_transcription(
 
         try:
             while not stop_event.is_set():
-                data = await websocket.receive()
+                try:
+                    if (
+                        current_emit_policy == "pause"
+                        and current_window_has_voice
+                        and IDLE_FLUSH_SECONDS > 0
+                    ):
+                        data = await asyncio.wait_for(
+                            websocket.receive(), timeout=IDLE_FLUSH_SECONDS
+                        )
+                    else:
+                        data = await websocket.receive()
+                except asyncio.TimeoutError:
+                    audio_bytes = b"".join(audio_chunks)
+                    if audio_bytes and not await enqueue_audio_window(
+                        audio_bytes, force_emit=True
+                    ):
+                        break
+                    continue
 
                 if data.get("type") == "websocket.disconnect":
                     stop_event.set()
@@ -613,6 +661,26 @@ async def stream_transcription(
                         current_language = message["language"]
                     if message.get("task") in {"transcribe", "translate"}:
                         current_task = message["task"]
+                    if "candidate_languages" in message:
+                        current_candidate_languages = _normalize_candidate_languages(
+                            message.get("candidate_languages")
+                        )
+                        await websocket.send_json(
+                            {
+                                "type": "candidate_languages_ack",
+                                "candidate_languages": list(
+                                    current_candidate_languages
+                                ),
+                            }
+                        )
+                    if message.get("emit_policy") in {"live", "pause"}:
+                        current_emit_policy = message["emit_policy"]
+                        await websocket.send_json(
+                            {
+                                "type": "emit_policy_ack",
+                                "emit_policy": current_emit_policy,
+                            }
+                        )
                     continue
 
                 if "bytes" not in data:
@@ -674,7 +742,11 @@ async def stream_transcription(
                     and pause_flush_bytes > 0
                     and trailing_silence_bytes >= pause_flush_bytes
                 )
-                if len(audio_bytes) >= min_chunk_bytes or should_flush_for_pause:
+                should_flush_for_size = (
+                    current_emit_policy == "live"
+                    and len(audio_bytes) >= min_chunk_bytes
+                )
+                if should_flush_for_size or should_flush_for_pause:
                     if not await enqueue_audio_window(
                         audio_bytes, force_emit=should_flush_for_pause
                     ):
@@ -799,6 +871,24 @@ async def stream_transcription(
                         full_transcript, ordered_result.transcript
                     )
                     if not new_text:
+                        if (
+                            ordered_result.force_emit
+                            and pending_transcript
+                            and full_transcript
+                        ):
+                            emitted_at = time.time()
+                            metrics = _result_metrics(ordered_result, emitted_at)
+                            await websocket.send_json(
+                                {
+                                    "text": full_transcript,
+                                    "is_final": False,
+                                    "language": ordered_result.detected_language,
+                                    "has_speech": ordered_result.has_speech,
+                                    "metrics": metrics,
+                                }
+                            )
+                            pending_transcript = ""
+                            last_emit_time = emitted_at
                         continue
 
                     if _should_drop_no_speech_new_text(ordered_result, new_text):
@@ -839,10 +929,12 @@ async def stream_transcription(
                     pending_transcript = f"{pending_transcript} {new_text}".strip()
 
                     now = time.time()
-                    should_emit = (
-                        ordered_result.force_emit
-                        or len(pending_transcript) >= EMIT_MIN_CHARS
-                        or now - last_emit_time >= EMIT_INTERVAL_SECONDS
+                    should_emit = ordered_result.force_emit or (
+                        current_emit_policy == "live"
+                        and (
+                            len(pending_transcript) >= EMIT_MIN_CHARS
+                            or now - last_emit_time >= EMIT_INTERVAL_SECONDS
+                        )
                     )
 
                     if should_emit:
@@ -867,7 +959,11 @@ async def stream_transcription(
                         )
                         pending_transcript = ""
                         last_emit_time = emitted_at
-                elif pending_transcript and full_transcript:
+                elif (
+                    (current_emit_policy == "live" or ordered_result.force_emit)
+                    and pending_transcript
+                    and full_transcript
+                ):
                     emitted_at = time.time()
                     metrics = _result_metrics(ordered_result, emitted_at)
                     await websocket.send_json(

@@ -22,8 +22,9 @@ from .whisper_service import WhisperService
 from .translation_service import TranslationService
 from .tts_service import TTSService
 from ..config import get_config
-from ..utils.config import parse_bool_config
+from ..utils.config import get_custom_instruction_max_chars, parse_bool_config
 from ..utils.logger import get_logger
+from ..utils.sanitize import normalize_instruction
 
 logger = get_logger(__name__)
 
@@ -267,6 +268,193 @@ class TranslationPipelineService:
 
         return ""
 
+    @staticmethod
+    def _normalize_language_code(language: Optional[str]) -> str:
+        """Normalize detected/provider language codes for pair matching."""
+        return (language or "").replace("-", "_").split("_")[0].lower()
+
+    @classmethod
+    def _language_match_codes(cls, language: Optional[str]) -> set[str]:
+        """Return language codes considered equivalent for conversation matching."""
+        base = cls._normalize_language_code(language)
+        if not base:
+            return set()
+        if base in {"hi", "ur"}:
+            return {"hi", "ur"}
+        return {base}
+
+    @classmethod
+    def _conversation_direction(
+        cls,
+        detected_language: Optional[str],
+        source_language: str,
+        target_language: str,
+    ) -> tuple[str, str]:
+        """Return translation direction for a bidirectional conversation turn."""
+        detected_matches = cls._language_match_codes(detected_language)
+        source_matches = cls._language_match_codes(source_language)
+        target_matches = cls._language_match_codes(target_language)
+        if (
+            detected_matches
+            and detected_matches & target_matches
+            and not detected_matches & source_matches
+        ):
+            return target_language, source_language
+        if detected_matches and not detected_matches & source_matches:
+            logger.info(
+                "Conversation STT language did not match selected pair; using default direction "
+                f"detected={detected_language} source={source_language} target={target_language}"
+            )
+        return source_language, target_language
+
+    async def _process_conversation_streaming(
+        self,
+        audio_generator: AsyncGenerator[bytes, None],
+        source_language: str,
+        target_language: str,
+        save_media: bool = True,
+        pause_event: Optional[asyncio.Event] = None,
+        visual_context_queue: Optional[asyncio.Queue] = None,
+        custom_instruction: Optional[str] = None,
+        custom_instruction_queue: Optional[asyncio.Queue] = None,
+    ) -> AsyncGenerator[dict, None]:
+        """Process pause-delimited bidirectional conversation turns."""
+        logger.info(
+            f"Starting conversation pipeline: {source_language} <-> {target_language}"
+        )
+        pause_event = pause_event or asyncio.Event()
+        full_transcript = ""
+        turn_id = 0
+        visual_context_summary = None
+        custom_instruction_max_chars = get_custom_instruction_max_chars()
+        current_custom_instruction = normalize_instruction(
+            custom_instruction,
+            custom_instruction_max_chars,
+        )
+        translation_context = TranslationContextWindow(
+            enabled=False, max_chunks=0, max_chars=0
+        )
+
+        async def paused_audio_generator():
+            async for chunk in audio_generator:
+                while pause_event.is_set():
+                    await asyncio.sleep(0.1)
+                yield chunk
+
+        async def drain_visual_context_updates() -> None:
+            nonlocal visual_context_summary
+            if visual_context_queue is None:
+                return
+            while True:
+                try:
+                    summary = visual_context_queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    break
+                visual_context_summary = " ".join(str(summary or "").split()) or None
+
+        async def drain_custom_instruction_updates() -> None:
+            nonlocal current_custom_instruction
+            if custom_instruction_queue is None:
+                return
+            updated = False
+            while True:
+                try:
+                    instruction = custom_instruction_queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    break
+                current_custom_instruction = normalize_instruction(
+                    instruction,
+                    custom_instruction_max_chars,
+                )
+                updated = True
+            if updated:
+                logger.info(
+                    "Custom translation instruction updated: "
+                    f"chars={len(current_custom_instruction or '')}"
+                )
+
+        try:
+            async for trans_result in self.whisper.stream_transcribe(
+                paused_audio_generator(),
+                None,
+                emit_policy="pause",
+                candidate_languages=[source_language, target_language],
+            ):
+                await drain_visual_context_updates()
+                await drain_custom_instruction_updates()
+                if not trans_result.success:
+                    yield {"type": "error", "error": trans_result.error}
+                    continue
+
+                current_text = trans_result.text.strip()
+                text_to_translate = self._extract_new_transcript_text(
+                    current_text, full_transcript
+                )
+                full_transcript = current_text or full_transcript
+                if len(text_to_translate.strip()) < 2:
+                    continue
+
+                turn_source, turn_target = self._conversation_direction(
+                    trans_result.language, source_language, target_language
+                )
+                turn_id += 1
+                yield {
+                    "type": "transcription",
+                    "transcript": current_text,
+                    "detected_language": trans_result.language,
+                    "source_language": turn_source,
+                    "target_language": turn_target,
+                    "is_partial": trans_result.is_partial,
+                    "success": True,
+                }
+
+                result = await self.translation.translate(
+                    text_to_translate,
+                    turn_source,
+                    turn_target,
+                    context=translation_context.snapshot(),
+                    visual_context=visual_context_summary,
+                    custom_instruction=current_custom_instruction,
+                )
+                if not result.success:
+                    yield {
+                        "type": "error",
+                        "error": result.error or "Translation failed",
+                    }
+                    continue
+
+                yield {
+                    "type": "conversation_turn",
+                    "turn_id": turn_id,
+                    "source_language": turn_source,
+                    "target_language": turn_target,
+                    "detected_language": trans_result.language,
+                    "transcript": text_to_translate,
+                    "translated_text": result.text,
+                }
+
+                tts_result = await self._synthesize(
+                    result.text, turn_target, save_media=False
+                )
+                if tts_result.success:
+                    yield {
+                        "type": "tts",
+                        "audio_url": tts_result.audio_url,
+                        "sequence": turn_id,
+                        "turn_id": turn_id,
+                        "language": turn_target,
+                    }
+                elif tts_result.error:
+                    yield {"type": "error", "error": tts_result.error}
+
+            yield {"type": "complete"}
+        except (GeneratorExit, asyncio.CancelledError):
+            logger.info("Conversation pipeline cancelled")
+            raise
+        except Exception as e:
+            logger.error(f"Conversation pipeline error: {e}")
+            yield {"type": "error", "error": str(e), "success": False}
+
     async def process_streaming(
         self,
         audio_generator: AsyncGenerator[bytes, None],
@@ -276,6 +464,9 @@ class TranslationPipelineService:
         pause_event: Optional[asyncio.Event] = None,
         language_swap_queue: Optional[asyncio.Queue] = None,
         visual_context_queue: Optional[asyncio.Queue] = None,
+        mode: str = "live",
+        custom_instruction: Optional[str] = None,
+        custom_instruction_queue: Optional[asyncio.Queue] = None,
     ) -> AsyncGenerator[dict, None]:
         """
         Process streaming audio with the real-time translation pipeline.
@@ -298,10 +489,27 @@ class TranslationPipelineService:
             language_swap_queue: Optional asyncio.Queue for receiving language swap updates
             visual_context_queue: Optional asyncio.Queue for shared tab/page visual
                 context summary updates
+            custom_instruction: Optional user-provided translation guidance
+            custom_instruction_queue: Optional asyncio.Queue for runtime custom
+                translation instruction updates
 
         Yields:
             Dictionary with streaming pipeline results
         """
+
+        if mode == "conversation":
+            async for result in self._process_conversation_streaming(
+                audio_generator,
+                source_language,
+                target_language,
+                save_media=save_media,
+                pause_event=pause_event,
+                visual_context_queue=visual_context_queue,
+                custom_instruction=custom_instruction,
+                custom_instruction_queue=custom_instruction_queue,
+            ):
+                yield result
+            return
 
         logger.info(
             f"Starting streaming pipeline: {source_language} -> {target_language}"
@@ -564,6 +772,11 @@ class TranslationPipelineService:
                 max_chars=translation_context_max_chars,
             )
             visual_context_summary = None
+            custom_instruction_max_chars = get_custom_instruction_max_chars()
+            current_custom_instruction = normalize_instruction(
+                custom_instruction,
+                custom_instruction_max_chars,
+            )
 
             async def drain_visual_context_updates() -> None:
                 nonlocal visual_context_summary
@@ -587,6 +800,29 @@ class TranslationPipelineService:
                         f"chars={len(visual_context_summary or '')}"
                     )
 
+            async def drain_custom_instruction_updates() -> None:
+                nonlocal current_custom_instruction
+                if custom_instruction_queue is None:
+                    return
+
+                updated = False
+                while True:
+                    try:
+                        instruction = custom_instruction_queue.get_nowait()
+                    except asyncio.QueueEmpty:
+                        break
+                    current_custom_instruction = normalize_instruction(
+                        instruction,
+                        custom_instruction_max_chars,
+                    )
+                    updated = True
+
+                if updated:
+                    logger.info(
+                        "Custom translation instruction updated: "
+                        f"chars={len(current_custom_instruction or '')}"
+                    )
+
             async def enqueue_tts(text: str, sequence: int) -> None:
                 await tts_queue.put(
                     TranslatedSentence(
@@ -605,6 +841,7 @@ class TranslationPipelineService:
                 nonlocal translation_buffer_started_at, translation_sequence
 
                 await drain_visual_context_updates()
+                await drain_custom_instruction_updates()
 
                 remaining_text = translation_buffer.strip()
                 if not remaining_text:
@@ -623,6 +860,7 @@ class TranslationPipelineService:
                         target_lang,
                         context=translation_context.snapshot(),
                         visual_context=visual_context_summary,
+                        custom_instruction=current_custom_instruction,
                     )
                     if result.success:
                         translation_context.remember(remaining_text, result.text)
@@ -668,6 +906,7 @@ class TranslationPipelineService:
                         msg = await asyncio.wait_for(trans_queue.get(), timeout=0.5)
                     except asyncio.TimeoutError:
                         await drain_visual_context_updates()
+                        await drain_custom_instruction_updates()
                         if translation_buffer.strip() and translation_buffer_started_at:
                             buffer_age = time.time() - translation_buffer_started_at
                             if buffer_age >= translation_flush_seconds:
@@ -692,6 +931,7 @@ class TranslationPipelineService:
                         continue
 
                     await drain_visual_context_updates()
+                    await drain_custom_instruction_updates()
 
                     trans_result = msg["result"]
                     asr_translation_queue_wait = (
@@ -831,6 +1071,7 @@ class TranslationPipelineService:
                                     target_lang,
                                     context=translation_context.snapshot(),
                                     visual_context=visual_context_summary,
+                                    custom_instruction=current_custom_instruction,
                                 )
                                 if result.success:
                                     break
