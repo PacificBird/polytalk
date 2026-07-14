@@ -45,3 +45,4 @@ piper/
 media/
 config/config.yaml
 .codex/config.toml
+ollama_data
