@@ -9,4 +9,4 @@ Go to `localhost:9000` in your web browser, hit the config button to select your
   
 "You are a professional English (EN) and Spanish (ES) interpreter in a meeting. Your goal is to accurately convey the meaning and nuances of the original English and Spanish text, and translate one into the other."
 
-Then hit the button in the middle shaped like a text box (the conversation button) and that's it! Fair warning, this is set to run on the CPU so that it's plug and play for anyone, but this makes it pretty damn slow. This should not be relied upon, but used as a secondary aid. I will work on making a branch that uses GPU acceleration for those that have it.
+Then hit the button in the middle shaped like a text box (the conversation button) and that's mostly it! The text to speech system is running on mock-mode so just hit the mute button when it comes up. Fair warning, this is set to run on the CPU so that it's plug and play for anyone, but this makes it pretty damn slow. This should not be relied upon, but used as a secondary aid. I will work on making a branch that uses GPU acceleration for those that have it.
