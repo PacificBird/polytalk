@@ -1057,7 +1057,6 @@ class PolyTalkApp {
         this.currentTTSPreload = item.audio;
 
         this.audioPlayer.src = audioUrl;
-        this.audioContainer.style.display = 'block';
         this.audioPlayer.load();
 
         try {
@@ -1439,7 +1438,6 @@ class PolyTalkApp {
 
         if (result.audio_url) {
             this.audioPlayer.src = result.audio_url;
-            this.audioContainer.style.display = 'block';
 
             const autoPlay = document.querySelector('meta[name="auto-play"]')?.content === 'true';
             if (autoPlay) {
@@ -1586,7 +1584,6 @@ class PolyTalkApp {
         if (!this.recordingIndicator) {
             return;
         }
-        this.recordingIndicator.classList.toggle('visible', visible);
         this.recordingIndicator.setAttribute('aria-label', text);
         this.recordingIndicator.innerHTML = `
             <span class="listening-wave-side listening-wave-left" aria-hidden="true">
