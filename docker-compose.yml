@@ -1,4 +1,17 @@
 services:
+  ollama:
+    image: ollama/ollama:latest
+    container_name: ollama
+    ports:
+      - "11434:11434"
+    volumes:
+      - ./ollama_data:/root/.ollama
+    environment:
+      - OLLAMA_NUM_PARALLEL=4
+      - OLLAMA_MAX_LOADED_MODELS=3
+    networks:
+      - polytalk-network
+    restart: unless-stopped
   stt:
     build:
       context: ./stt
@@ -7,6 +20,8 @@ services:
         STT_MODEL: ${STT_MODEL:-small}
         STT_DEVICE: ${STT_DEVICE:-cpu}
         STT_COMPUTE_TYPE: ${STT_COMPUTE_TYPE:-int8}
+        STT_STREAM_CHUNK_SECONDS: 0.5
+        STT_BEAM_SIZE: 1
     container_name: polytalk-stt
     restart: unless-stopped
     ports:
@@ -41,19 +56,8 @@ services:
       - STT_WORKERS=${STT_WORKERS:-1}
       - STORAGE_DIR=/data
       - MAX_UPLOAD_MB=${STT_MAX_UPLOAD_MB:-200}
-    volumes:
-      - stt_data:/data
-      # Mount STT app source for development (remove for production)
-      - ./stt/app:/app/app:ro
     networks:
       - polytalk-network
-#   deploy:
-#     resources:
-#       reservations:
-#         devices:
-#           - driver: nvidia
-#             count: 1
-#             capabilities: [gpu]
 
   tts:
     build:
@@ -104,19 +108,19 @@ services:
       - WHISPER_WS_ENDPOINT=${WHISPER_WS_ENDPOINT:-/v1/stream/transcriptions}
       # Translation service
       - TRANSLATION_API_FORMAT=${TRANSLATION_API_FORMAT:-openai_chat}
-      - TRANSLATION_BASE_URL=${TRANSLATION_BASE_URL:-https://api.openai.com}
+      - TRANSLATION_BASE_URL=${TRANSLATION_BASE_URL:-http://ollama:11434}
       - TRANSLATION_ENDPOINT=${TRANSLATION_ENDPOINT:-/v1/chat/completions}
-      - TRANSLATION_API_KEY=${TRANSLATION_API_KEY:-}
-      - TRANSLATION_MODEL=${TRANSLATION_MODEL:-gpt-4o-mini}
+      - TRANSLATION_API_KEY=${TRANSLATION_API_KEY:-placeholder}
+      - TRANSLATION_MODEL=${TRANSLATION_MODEL:-translategemma:4b}
       - TRANSLATION_MAX_TOKENS=${TRANSLATION_MAX_TOKENS:-160}
       - TRANSLATEGAMMA_API_FORMAT=${TRANSLATEGAMMA_API_FORMAT:-${TRANSLATION_API_FORMAT:-openai_chat}}
-      - TRANSLATEGAMMA_BASE_URL=${TRANSLATEGAMMA_BASE_URL:-${TRANSLATION_BASE_URL:-https://api.openai.com}}
+      - TRANSLATEGAMMA_BASE_URL=${TRANSLATEGAMMA_BASE_URL:-${TRANSLATION_BASE_URL:-http://ollama:11434}}
       - TRANSLATEGAMMA_ENDPOINT=${TRANSLATEGAMMA_ENDPOINT:-${TRANSLATION_ENDPOINT:-/v1/chat/completions}}
-      - TRANSLATEGAMMA_API_KEY=${TRANSLATEGAMMA_API_KEY:-${TRANSLATION_API_KEY:-}}
-      - TRANSLATEGAMMA_MODEL=${TRANSLATEGAMMA_MODEL:-${TRANSLATION_MODEL:-gpt-4o-mini}}
+      - TRANSLATEGAMMA_API_KEY=${TRANSLATEGAMMA_API_KEY:-${TRANSLATION_API_KEY:-placeholder}}
+      - TRANSLATEGAMMA_MODEL=${TRANSLATEGAMMA_MODEL:-${TRANSLATION_MODEL:-translategemma:4b}}
       # Visual context service
       - VISUAL_CONTEXT_ENABLED=${VISUAL_CONTEXT_ENABLED:-false}
-      - VISUAL_CONTEXT_MOCK_MODE=${VISUAL_CONTEXT_MOCK_MODE:-true}
+      - VISUAL_CONTEXT_MOCK_MODE=${VISUAL_CONTEXT_MOCK_MODE:-false}
       - VISUAL_CONTEXT_API_FORMAT=${VISUAL_CONTEXT_API_FORMAT:-openai_chat}
       - VISUAL_CONTEXT_BASE_URL=${VISUAL_CONTEXT_BASE_URL:-${TRANSLATION_BASE_URL:-https://api.openai.com}}
       - VISUAL_CONTEXT_ENDPOINT=${VISUAL_CONTEXT_ENDPOINT:-${TRANSLATION_ENDPOINT:-/v1/chat/completions}}
@@ -147,8 +151,6 @@ services:
       - ./app:/app/app:ro
       # Mount config files
       - ./config:/app/config:ro
-      # Persist generated media files
-      - ./media/output:/app/media/output
     restart: unless-stopped
     extra_hosts:
       - "host.docker.internal:host-gateway"
