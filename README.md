@@ -1,4 +1,5 @@
 # Instructions for setp:
+- Step 0: pull this repository using `git clone https://github.com/PacificBird/polytalk.git`.
 - Step 1: Install docker compose. If you're on Linux, you probably already know how to do this intuitive. If you're on a differenet platform or don't know how, go here: https://docs.docker.com/compose/install/, or look up "how to set up docker compose".
 - Step 2: Build and run the containers by doing `docker compose build`, followed by `docker compose up`.
 - Step 3: Download the LLM for translation. Inside the `ollama` container, run `ollama pull translategemma:4b`. If you're in the command line on Linux this can be done by doing `docker exec -it ollama ollama pull translategemma:4b`.
